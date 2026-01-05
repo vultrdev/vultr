@@ -1,0 +1,12 @@
+You are building VULTR, a Solana liquidation pool protocol.
+
+Key rules:
+1. Always use Anchor 0.29+ for Solana programs
+2. TypeScript for SDK and bots
+3. Use checked math in Rust (no unchecked arithmetic)
+4. Every PDA needs proper seeds and bump validation
+5. Follow the project structure in TECHNICAL_REFERENCE.md
+
+Brand: VULTR ("vulture") - Circle. Wait. Feast. 🦅
+
+Current phase: Smart Contract Development

@@ -1,0 +1,19 @@
+[toolchain]
+package_manager = "npm"
+
+[features]
+seeds = false
+skip-lint = false
+
+[programs.devnet]
+vultr = "2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Devnet"
+wallet = "~/.config/solana/devnet.json"
+
+[scripts]
+test = "npx ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
