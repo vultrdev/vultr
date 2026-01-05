@@ -1,0 +1,38 @@
+{
+  "name": "@vultr/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the VULTR Solana liquidation pool protocol",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "solana",
+    "liquidation",
+    "defi",
+    "vultr",
+    "anchor"
+  ],
+  "author": "vultrdev",
+  "license": "MIT",
+  "dependencies": {
+    "@coral-xyz/anchor": ">=0.29.0",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": ">=1.70.0"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "peerDependencies": {
+    "@coral-xyz/anchor": ">=0.29.0",
+    "@solana/web3.js": ">=1.70.0"
+  }
+}

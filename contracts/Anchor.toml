@@ -5,6 +5,9 @@ package_manager = "npm"
 seeds = false
 skip-lint = false
 
+[programs.localnet]
+vultr = "2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm"
+
 [programs.devnet]
 vultr = "2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm"
 
@@ -12,8 +15,8 @@ vultr = "2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Devnet"
-wallet = "~/.config/solana/devnet.json"
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "npx ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
