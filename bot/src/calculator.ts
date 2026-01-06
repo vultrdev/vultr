@@ -15,6 +15,7 @@ import {
   AssetPosition,
 } from "./types";
 import { MarginfiClient } from "./marginfi";
+import { PythOracleClient } from "./oracle";
 import { Logger } from "./logger";
 
 // =============================================================================
@@ -29,10 +30,12 @@ const LAMPORTS_PER_CU = 0.000001; // Micro-lamports per CU at priority
 // Swap slippage tolerance
 const SWAP_SLIPPAGE_BPS = 50; // 0.5%
 
-// SOL price for gas cost estimation
-// TODO: In production, fetch live SOL price from Pyth/Switchboard oracle
-// or Jupiter price API. This fallback is used when price fetch fails.
+// SOL price for gas cost estimation (fallback only)
+// Primary source is Pyth oracle client
 const DEFAULT_SOL_PRICE_USD = 100;
+
+// SOL mint address for price fetching
+const SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 
 // =============================================================================
 // Liquidation Calculator
@@ -44,15 +47,21 @@ const DEFAULT_SOL_PRICE_USD = 100;
 export class LiquidationCalculator {
   private config: BotConfig;
   private marginfi: MarginfiClient;
+  private oracle: PythOracleClient;
   private logger: Logger;
+  private cachedSolPrice: number | null = null;
+  private cachedSolPriceTimestamp: number = 0;
+  private readonly PRICE_CACHE_TTL_MS = 5000; // 5 seconds
 
   constructor(
     config: BotConfig,
     marginfi: MarginfiClient,
+    oracle: PythOracleClient,
     logger?: Logger
   ) {
     this.config = config;
     this.marginfi = marginfi;
+    this.oracle = oracle;
     this.logger = logger || new Logger("Calculator");
   }
 
@@ -98,11 +107,15 @@ export class LiquidationCalculator {
     // Estimate gas costs
     const estimatedGasCost = this.estimateGasCost();
 
-    // Calculate net profit
-    const netProfit = this.calculateNetProfit(grossProfit, estimatedGasCost);
+    // Fetch live SOL price for accurate gas cost calculation
+    const solPrice = await this.getSolPrice();
+
+    // Calculate net profit using live SOL price
+    const netProfit = this.calculateNetProfit(grossProfit, estimatedGasCost, solPrice);
     const netProfitUsd = this.calculateNetProfitUsd(
       grossProfitUsd,
-      estimatedGasCost
+      estimatedGasCost,
+      solPrice
     );
 
     // Calculate profit in basis points
@@ -244,6 +257,36 @@ export class LiquidationCalculator {
     }
 
     return totalCost;
+  }
+
+  /**
+   * Fetch live SOL price from Pyth oracle with caching
+   */
+  private async getSolPrice(): Promise<number> {
+    // Check cache first
+    const now = Date.now();
+    if (
+      this.cachedSolPrice !== null &&
+      now - this.cachedSolPriceTimestamp < this.PRICE_CACHE_TTL_MS
+    ) {
+      return this.cachedSolPrice;
+    }
+
+    try {
+      const priceData = await this.oracle.fetchPrice(SOL_MINT);
+      if (priceData && priceData.priceUsd > 0) {
+        this.cachedSolPrice = priceData.priceUsd;
+        this.cachedSolPriceTimestamp = now;
+        this.logger.debug(`Fetched SOL price: $${priceData.priceUsd.toFixed(2)}`);
+        return priceData.priceUsd;
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to fetch SOL price from oracle: ${error}`);
+    }
+
+    // Fallback to default price
+    this.logger.debug(`Using default SOL price: $${DEFAULT_SOL_PRICE_USD}`);
+    return DEFAULT_SOL_PRICE_USD;
   }
 
   /**

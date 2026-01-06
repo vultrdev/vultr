@@ -30,6 +30,7 @@ import {
   TokenPrice,
   MarginfiAccounts,
 } from "./types";
+import { PythOracleClient } from "./oracle";
 import { Logger } from "./logger";
 
 // =============================================================================
@@ -67,13 +68,15 @@ const KNOWN_TOKENS: Record<string, { symbol: string; decimals: number }> = {
  */
 export class MarginfiClient {
   private connection: Connection;
+  private oracle: PythOracleClient;
   private logger: Logger;
   private priceCache: Map<string, TokenPrice> = new Map();
   // TODO: Add marginfi client instance
   // private marginfiClient: MarginfiClientType;
 
-  constructor(connection: Connection, logger?: Logger) {
+  constructor(connection: Connection, oracle: PythOracleClient, logger?: Logger) {
     this.connection = connection;
+    this.oracle = oracle;
     this.logger = logger || new Logger("Marginfi");
   }
 
@@ -324,6 +327,8 @@ export class MarginfiClient {
   /**
    * Fetch token price from oracle
    *
+   * Uses Pyth oracle client with fallback to mock prices for unknown tokens
+   *
    * @param mint - Token mint address
    * @returns Token price or null if not available
    */
@@ -337,20 +342,19 @@ export class MarginfiClient {
     }
 
     try {
-      // TODO: Fetch from Pyth oracle
-      //
-      // Option 1: Use Marginfi's bank oracle
-      // const bank = this.marginfiClient.getBankByMint(mint);
-      // const priceData = await bank.getOraclePrice();
-      // const price = priceData.price;
-      //
-      // Option 2: Use Pyth directly
-      // import { PythHttpClient } from "@pythnetwork/client";
-      // const pythClient = new PythHttpClient(this.connection);
-      // const priceData = await pythClient.getAssetPriceFromWebApi(mint);
-      // const price = priceData.aggregate.price;
+      // Fetch from Pyth oracle client
+      // This handles Pyth feeds with Jupiter fallback
+      const tokenPrice = await this.oracle.fetchPrice(mint);
 
-      // Mock prices for now
+      if (tokenPrice) {
+        // Cache the price
+        this.priceCache.set(mintStr, tokenPrice);
+        return tokenPrice;
+      }
+
+      // If oracle returns null, fallback to mock prices for testing
+      this.logger.debug(`No oracle price for ${mintStr}, using mock fallback`);
+
       const mockPrices: Record<string, number> = {
         EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 1.0, // USDC
         So11111111111111111111111111111111111111112: 100.0, // SOL
@@ -359,21 +363,21 @@ export class MarginfiClient {
         "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs": 2500.0, // ETH
       };
 
-      const price = mockPrices[mintStr];
-      if (price === undefined) {
+      const mockPrice = mockPrices[mintStr];
+      if (mockPrice === undefined) {
         return null;
       }
 
-      const tokenPrice: TokenPrice = {
+      const fallbackPrice: TokenPrice = {
         mint,
-        priceUsd: price,
+        priceUsd: mockPrice,
         confidence: 0.01,
         timestamp: Date.now(),
-        source: "mock", // TODO: Change to "pyth" or "marginfi"
+        source: "mock",
       };
 
-      this.priceCache.set(mintStr, tokenPrice);
-      return tokenPrice;
+      this.priceCache.set(mintStr, fallbackPrice);
+      return fallbackPrice;
     } catch (error) {
       this.logger.warn(`Failed to fetch price for ${mintStr}`, error);
       return null;
