@@ -55,6 +55,30 @@ export enum LendingProtocol {
 }
 
 /**
+ * Marginfi-specific account references for liquidation
+ */
+export interface MarginfiAccounts {
+  /** Marginfi group (protocol config) */
+  marginfiGroup: PublicKey;
+  /** Asset bank (collateral) */
+  assetBank: PublicKey;
+  /** Liability bank (debt) */
+  liabBank: PublicKey;
+  /** Asset bank liquidity vault */
+  assetBankLiquidityVault: PublicKey;
+  /** Liability bank liquidity vault */
+  liabBankLiquidityVault: PublicKey;
+  /** Insurance vault */
+  insuranceVault: PublicKey;
+  /** Insurance vault authority */
+  insuranceVaultAuthority: PublicKey;
+  /** Asset bank oracle (price feed) */
+  assetBankOracle: PublicKey;
+  /** Liability bank oracle (price feed) */
+  liabBankOracle: PublicKey;
+}
+
+/**
  * A lending position that can potentially be liquidated
  */
 export interface LendingPosition {
@@ -80,6 +104,8 @@ export interface LendingPosition {
   collaterals: AssetPosition[];
   /** Timestamp when this position was fetched */
   fetchedAt: number;
+  /** Marginfi-specific accounts (if protocol is Marginfi) */
+  marginfiAccounts?: MarginfiAccounts;
 }
 
 /**

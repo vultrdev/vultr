@@ -205,14 +205,25 @@ export class LiquidationExecutor {
       this.config.vultrProgramId
     );
 
-    // TODO: Get actual Marginfi accounts from opportunity
-    // For now, using placeholders
-    const marginfiGroup = new PublicKey("11111111111111111111111111111111");
+    // Get Marginfi accounts from opportunity
+    // These are populated by the Marginfi client when fetching positions
+    if (!opportunity.position.marginfiAccounts) {
+      throw new Error("Missing Marginfi accounts in opportunity");
+    }
+
+    const {
+      marginfiGroup,
+      assetBank,
+      liabBank,
+      assetBankLiquidityVault,
+      liabBankLiquidityVault,
+      insuranceVault,
+      insuranceVaultAuthority,
+      assetBankOracle,
+      liabBankOracle,
+    } = opportunity.position.marginfiAccounts;
+
     const liquidateeMarginfiAccount = opportunity.position.accountAddress;
-    const assetBank = new PublicKey("11111111111111111111111111111111");
-    const liabBank = new PublicKey("11111111111111111111111111111111");
-    const assetBankLiquidityVault = new PublicKey("11111111111111111111111111111111");
-    const liabBankLiquidityVault = new PublicKey("11111111111111111111111111111111");
 
     // Collateral account (pool-controlled)
     const liquidatorCollateralAccount = await getAssociatedTokenAddress(
@@ -220,11 +231,6 @@ export class LiquidationExecutor {
       poolPda,
       true // allowOwnerOffCurve
     );
-
-    const insuranceVault = new PublicKey("11111111111111111111111111111111");
-    const insuranceVaultAuthority = new PublicKey("11111111111111111111111111111111");
-    const assetBankOracle = new PublicKey("11111111111111111111111111111111");
-    const liabBankOracle = new PublicKey("11111111111111111111111111111111");
 
     // Asset amount to liquidate (liability to repay)
     const assetAmount = opportunity.debtToRepay.amount;
