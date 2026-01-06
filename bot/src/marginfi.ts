@@ -16,12 +16,8 @@ import {
   PublicKey,
 } from "@solana/web3.js";
 import BN from "bn.js";
-
-// TODO: Install marginfi-client-v2
-// npm install @mrgnlabs/marginfi-client-v2
-//
-// For now, we'll provide the structure with detailed TODOs
-// showing how to integrate the real SDK
+import { MarginfiClient as MarginfiClientSDK, MarginRequirementType } from "@mrgnlabs/marginfi-client-v2";
+import { Wallet } from "@coral-xyz/anchor";
 
 import {
   LendingPosition,
@@ -71,8 +67,7 @@ export class MarginfiClient {
   private oracle: PythOracleClient;
   private logger: Logger;
   private priceCache: Map<string, TokenPrice> = new Map();
-  // TODO: Add marginfi client instance
-  // private marginfiClient: MarginfiClientType;
+  private marginfiClient: MarginfiClientSDK | null = null;
 
   constructor(connection: Connection, oracle: PythOracleClient, logger?: Logger) {
     this.connection = connection;
@@ -93,20 +88,30 @@ export class MarginfiClient {
     this.logger.info("Initializing Marginfi client...");
 
     try {
-      // TODO: Initialize marginfi-client-v2
-      //
-      // const config = {
-      //   connection: this.connection,
-      //   groupPk: MARGINFI_GROUPS.MAIN,
-      //   programId: MARGINFI_PROGRAM_ID,
-      // };
-      //
-      // this.marginfiClient = await MarginfiClientType.fetch(
-      //   config,
-      //   {} // wallet not needed for read-only operations
-      // );
+      // Create read-only wallet (no private key needed)
+      const readOnlyWallet = {
+        publicKey: PublicKey.default,
+        signTransaction: async () => { throw new Error("Read-only wallet"); },
+        signAllTransactions: async () => { throw new Error("Read-only wallet"); },
+        payer: { publicKey: PublicKey.default } as any,
+      };
 
-      this.logger.success("Marginfi client initialized");
+      // Initialize marginfi client in read-only mode
+      const config = {
+        environment: "production" as const,
+        cluster: this.connection.rpcEndpoint,
+        programId: MARGINFI_PROGRAM_ID,
+        groupPk: MARGINFI_GROUPS.MAIN,
+      };
+
+      this.marginfiClient = await MarginfiClientSDK.fetch(
+        config,
+        readOnlyWallet as unknown as Wallet,
+        this.connection,
+        { readOnly: true }
+      );
+
+      this.logger.success(`Marginfi client initialized (group: ${MARGINFI_GROUPS.MAIN.toBase58().slice(0, 8)}...)`);
     } catch (error) {
       this.logger.error("Failed to initialize Marginfi client", error);
       throw error;
@@ -125,32 +130,53 @@ export class MarginfiClient {
   async fetchLiquidatablePositions(): Promise<LendingPosition[]> {
     this.logger.debug("Fetching liquidatable positions from Marginfi...");
 
+    if (!this.marginfiClient) {
+      this.logger.warn("Marginfi client not initialized, call initialize() first");
+      return [];
+    }
+
     try {
-      // TODO: Implement with marginfi-client-v2
-      //
-      // Step 1: Fetch all margin accounts
-      // const allAccounts = await this.marginfiClient.getAllMarginfiAccounts();
-      //
-      // Step 2: Filter for liquidatable (health < 1)
-      // const liquidatableAccounts = allAccounts.filter(account => {
-      //   const health = account.computeHealthComponents();
-      //   return health.health < 1.0;
-      // });
-      //
-      // Step 3: Parse into LendingPosition with all account refs
-      // const positions = await Promise.all(
-      //   liquidatableAccounts.map(account => this.parseMarginAccount(account))
-      // );
+      // Step 1: Fetch all margin account addresses
+      const accountAddresses = await this.marginfiClient.getAllMarginfiAccountAddresses();
+      this.logger.debug(`Found ${accountAddresses.length} total margin accounts`);
 
-      const positions: LendingPosition[] = [];
+      // Step 2: Fetch account data in batches (RPC limit: 100 accounts per call)
+      const batchSize = 100;
+      const allAccounts = [];
 
-      // TODO: Remove this after implementing real fetching
-      // For now, return empty array
-      this.logger.warn("Using stubbed fetchLiquidatablePositions - returns empty");
-      this.logger.warn("Install @mrgnlabs/marginfi-client-v2 and uncomment TODOs");
+      for (let i = 0; i < accountAddresses.length; i += batchSize) {
+        const batch = accountAddresses.slice(i, i + batchSize);
+        const accounts = await this.marginfiClient.getMultipleMarginfiAccounts(batch);
+        allAccounts.push(...accounts);
+      }
 
-      this.logger.info(`Found ${positions.length} liquidatable positions`);
-      return positions;
+      this.logger.debug(`Fetched ${allAccounts.length} margin account data`);
+
+      // Step 3: Filter for liquidatable accounts (health < 1)
+      const liquidatableAccounts = allAccounts.filter(account => {
+        try {
+          const health = account.computeHealthComponents(MarginRequirementType.Maintenance);
+          // Health factor = assets / liabilities
+          const healthFactor = health.liabilities.isZero()
+            ? Number.MAX_SAFE_INTEGER
+            : health.assets.div(health.liabilities).toNumber();
+
+          return healthFactor < 1.0;
+        } catch (error) {
+          this.logger.debug(`Failed to compute health for account: ${error}`);
+          return false;
+        }
+      });
+
+      this.logger.debug(`Found ${liquidatableAccounts.length} liquidatable accounts`);
+
+      // Step 4: Parse into LendingPosition with all account refs
+      const positions = await Promise.all(
+        liquidatableAccounts.map(account => this.parseMarginAccount(account))
+      );
+
+      this.logger.info(`Found ${positions.filter(p => p !== null).length} liquidatable positions`);
+      return positions.filter((p): p is LendingPosition => p !== null);
     } catch (error) {
       this.logger.error("Failed to fetch liquidatable positions", error);
       return [];
@@ -193,62 +219,88 @@ export class MarginfiClient {
    * - All Marginfi account addresses (banks, vaults, oracles)
    */
   private async parseMarginAccount(
-    account: any // TODO: Type as MarginfiAccount from marginfi-client-v2
-  ): Promise<LendingPosition> {
-    // TODO: Implement real parsing with marginfi-client-v2
-    //
-    // Example structure:
-    //
-    // // 1. Get health components
-    // const health = account.computeHealthComponents();
-    // const healthFactor = health.health;
-    //
-    // // 2. Parse balances (borrows and collaterals)
-    // const borrows: AssetPosition[] = [];
-    // const collaterals: AssetPosition[] = [];
-    //
-    // for (const balance of account.balances) {
-    //   if (balance.active) {
-    //     const bank = this.marginfiClient.getBankByPk(balance.bankPk);
-    //     const position = await this.parseBalance(balance, bank);
-    //
-    //     if (balance.liabilityShares.gt(new BN(0))) {
-    //       borrows.push(position);
-    //     }
-    //     if (balance.assetShares.gt(new BN(0))) {
-    //       collaterals.push(position);
-    //     }
-    //   }
-    // }
-    //
-    // // 3. Calculate values
-    // const borrowedValueUsd = borrows.reduce((sum, b) => sum + b.valueUsd, 0);
-    // const collateralValueUsd = collaterals.reduce((sum, c) => sum + c.valueUsd, 0);
-    //
-    // // 4. Get Marginfi account references
-    // // This is crucial - we need all these for the liquidation CPI
-    // const marginfiAccounts = await this.extractMarginfiAccounts(
-    //   account,
-    //   borrows[0], // largest borrow (liability)
-    //   collaterals[0] // largest collateral (asset)
-    // );
-    //
-    // return {
-    //   protocol: LendingProtocol.Marginfi,
-    //   accountAddress: account.publicKey,
-    //   owner: account.authority,
-    //   borrowedValueUsd,
-    //   collateralValueUsd,
-    //   healthFactor,
-    //   ltv: borrowedValueUsd / collateralValueUsd,
-    //   liquidationThreshold: 0.8, // Get from bank config
-    //   borrows,
-    //   collaterals,
-    //   fetchedAt: Date.now(),
-    //   marginfiAccounts,
-    // };
+    account: any // MarginfiAccountWrapper from SDK
+  ): Promise<LendingPosition | null> {
+    try {
+      if (!this.marginfiClient) {
+        throw new Error("Marginfi client not initialized");
+      }
 
-    throw new Error("parseMarginAccount not implemented - install marginfi-client-v2");
+      // 1. Get health components
+      const health = account.computeHealthComponents(MarginRequirementType.Maintenance);
+      const healthFactor = health.liabilities.isZero()
+        ? Number.MAX_SAFE_INTEGER
+        : health.assets.div(health.liabilities).toNumber();
+
+      // 2. Parse balances (borrows and collaterals)
+      const borrows: AssetPosition[] = [];
+      const collaterals: AssetPosition[] = [];
+
+      for (const balance of account.balances) {
+        if (balance.active) {
+          const bankPk = balance.bankPk;
+          const bank = this.marginfiClient.banks.get(bankPk.toBase58());
+
+          if (!bank) {
+            this.logger.debug(`Bank not found for ${bankPk.toBase58()}`);
+            continue;
+          }
+
+          // Check if liability (borrow)
+          if (balance.liabilityShares.gtn(0)) {
+            const position = await this.parseBalance(balance, bank, false);
+            if (position) borrows.push(position);
+          }
+
+          // Check if asset (collateral)
+          if (balance.assetShares.gtn(0)) {
+            const position = await this.parseBalance(balance, bank, true);
+            if (position) collaterals.push(position);
+          }
+        }
+      }
+
+      // Must have both borrows and collaterals to be liquidatable
+      if (borrows.length === 0 || collaterals.length === 0) {
+        return null;
+      }
+
+      // 3. Calculate values
+      const borrowedValueUsd = borrows.reduce((sum, b) => sum + b.valueUsd, 0);
+      const collateralValueUsd = collaterals.reduce((sum, c) => sum + c.valueUsd, 0);
+
+      // 4. Get Marginfi account references (needed for liquidation CPI)
+      const largestBorrow = borrows.reduce((max, b) => b.valueUsd > max.valueUsd ? b : max);
+      const largestCollateral = collaterals.reduce((max, c) => c.valueUsd > max.valueUsd ? c : max);
+
+      const marginfiAccounts = await this.extractMarginfiAccounts(
+        account,
+        largestBorrow,
+        largestCollateral
+      );
+
+      if (!marginfiAccounts) {
+        return null;
+      }
+
+      return {
+        protocol: LendingProtocol.Marginfi,
+        accountAddress: account.address,
+        owner: account.authority,
+        borrowedValueUsd,
+        collateralValueUsd,
+        healthFactor,
+        ltv: collateralValueUsd > 0 ? borrowedValueUsd / collateralValueUsd : 0,
+        liquidationThreshold: 0.9, // Marginfi default
+        borrows,
+        collaterals,
+        fetchedAt: Date.now(),
+        marginfiAccounts,
+      };
+    } catch (error) {
+      this.logger.debug(`Failed to parse margin account: ${error}`);
+      return null;
+    }
   }
 
   /**
@@ -261,29 +313,55 @@ export class MarginfiClient {
     marginAccount: any,
     liabilityPosition: AssetPosition,
     assetPosition: AssetPosition
-  ): Promise<MarginfiAccounts> {
-    // TODO: Implement with marginfi-client-v2
-    //
-    // Example structure:
-    //
-    // // Get the banks for asset (collateral) and liability (debt)
-    // const assetBank = this.marginfiClient.getBankByMint(assetPosition.mint);
-    // const liabBank = this.marginfiClient.getBankByMint(liabilityPosition.mint);
-    //
-    // // Extract all required accounts from the banks
-    // return {
-    //   marginfiGroup: this.marginfiClient.groupPk,
-    //   assetBank: assetBank.publicKey,
-    //   liabBank: liabBank.publicKey,
-    //   assetBankLiquidityVault: assetBank.liquidityVault,
-    //   liabBankLiquidityVault: liabBank.liquidityVault,
-    //   insuranceVault: assetBank.insuranceVault,
-    //   insuranceVaultAuthority: assetBank.insuranceVaultAuthority,
-    //   assetBankOracle: assetBank.config.oracleKeys[0], // Pyth oracle
-    //   liabBankOracle: liabBank.config.oracleKeys[0],   // Pyth oracle
-    // };
+  ): Promise<MarginfiAccounts | null> {
+    try {
+      if (!this.marginfiClient) {
+        return null;
+      }
 
-    throw new Error("extractMarginfiAccounts not implemented");
+      // Find banks by mint
+      let assetBank = null;
+      let liabBank = null;
+
+      for (const [, bank] of this.marginfiClient.banks) {
+        if (bank.mint.equals(assetPosition.mint)) {
+          assetBank = bank;
+        }
+        if (bank.mint.equals(liabilityPosition.mint)) {
+          liabBank = bank;
+        }
+      }
+
+      if (!assetBank || !liabBank) {
+        this.logger.debug("Could not find required banks for liquidation");
+        return null;
+      }
+
+      // Derive insurance vault authority PDA
+      const [insuranceVaultAuthority] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("insurance_vault_authority"),
+          assetBank.address.toBuffer(),
+        ],
+        MARGINFI_PROGRAM_ID
+      );
+
+      // Extract all required account references
+      return {
+        marginfiGroup: this.marginfiClient.groupAddress,
+        assetBank: assetBank.address,
+        liabBank: liabBank.address,
+        assetBankLiquidityVault: assetBank.liquidityVault,
+        liabBankLiquidityVault: liabBank.liquidityVault,
+        insuranceVault: assetBank.insuranceVault,
+        insuranceVaultAuthority,
+        assetBankOracle: assetBank.config.oracleKeys[0],
+        liabBankOracle: liabBank.config.oracleKeys[0],
+      };
+    } catch (error) {
+      this.logger.debug(`Failed to extract Marginfi accounts: ${error}`);
+      return null;
+    }
   }
 
   /**
@@ -291,33 +369,40 @@ export class MarginfiClient {
    */
   private async parseBalance(
     balance: any,
-    bank: any
-  ): Promise<AssetPosition> {
-    // TODO: Implement with marginfi-client-v2
-    //
-    // const mint = bank.mint;
-    // const tokenInfo = this.getTokenInfo(mint);
-    // const price = await this.fetchTokenPrice(mint);
-    //
-    // // Calculate actual amount from shares
-    // const amount = balance.assetShares.gt(new BN(0))
-    //   ? bank.getAssetAmount(balance.assetShares)
-    //   : bank.getLiabilityAmount(balance.liabilityShares);
-    //
-    // const amountUi = Number(amount) / Math.pow(10, tokenInfo.decimals);
-    // const valueUsd = amountUi * (price?.priceUsd || 0);
-    //
-    // return {
-    //   mint,
-    //   symbol: tokenInfo.symbol,
-    //   amount,
-    //   amountUi,
-    //   valueUsd,
-    //   priceUsd: price?.priceUsd || 0,
-    //   decimals: tokenInfo.decimals,
-    // };
+    bank: any,
+    isAsset: boolean
+  ): Promise<AssetPosition | null> {
+    try {
+      const mint = bank.mint;
+      const tokenInfo = this.getTokenInfo(mint);
+      const price = await this.fetchTokenPrice(mint);
 
-    throw new Error("parseBalance not implemented");
+      if (!price) {
+        this.logger.debug(`No price available for ${mint.toBase58()}`);
+        return null;
+      }
+
+      // Calculate actual amount from shares
+      const amount = isAsset
+        ? bank.getAssetAmount(balance.assetShares)
+        : bank.getLiabilityAmount(balance.liabilityShares);
+
+      const amountUi = Number(amount.toString()) / Math.pow(10, tokenInfo.decimals);
+      const valueUsd = amountUi * price.priceUsd;
+
+      return {
+        mint,
+        symbol: tokenInfo.symbol,
+        amount,
+        amountUi,
+        valueUsd,
+        priceUsd: price.priceUsd,
+        decimals: tokenInfo.decimals,
+      };
+    } catch (error) {
+      this.logger.debug(`Failed to parse balance: ${error}`);
+      return null;
+    }
   }
 
   // ===========================================================================
