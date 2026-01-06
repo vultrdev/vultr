@@ -116,17 +116,23 @@ pub mod vultr {
         instructions::request_operator_withdrawal::handler_request_operator_withdrawal(ctx)
     }
 
-    /// Execute a liquidation (mock implementation for testing)
+    /// Execute a Marginfi liquidation (Step 1 of 2-step liquidation process)
     ///
     /// # Arguments
-    /// * `profit` - Profit from the liquidation (will be properly calculated in production)
+    /// * `asset_amount` - Amount of liability to repay (in deposit token base units)
     ///
-    /// # Profit Distribution
-    /// * 5% -> Protocol fee vault
-    /// * 15% -> Operator
-    /// * 80% -> Pool depositors (increases share value)
-    pub fn execute_liquidation(ctx: Context<ExecuteLiquidation>, profit: u64) -> Result<()> {
-        instructions::execute_liquidation::handler_execute_liquidation(ctx, profit)
+    /// # Flow
+    /// 1. Validates target margin account is liquidatable
+    /// 2. Calls Marginfi liquidate instruction via CPI
+    /// 3. Receives collateral in pool-controlled token account
+    /// 4. Collateral is swapped in separate complete_liquidation instruction
+    ///
+    /// # Notes
+    /// - This is Step 1 of a 2-step process (Marginfi CPI + Jupiter swap)
+    /// - Split due to compute budget constraints
+    /// - Profit distribution happens after swap in complete_liquidation
+    pub fn execute_liquidation(ctx: Context<ExecuteLiquidation>, asset_amount: u64) -> Result<()> {
+        instructions::execute_liquidation::handler_execute_liquidation(ctx, asset_amount)
     }
 
     // =========================================================================

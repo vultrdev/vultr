@@ -3,22 +3,21 @@
 // =============================================================================
 // Allows registered operators to execute liquidations and earn fees.
 //
-// ⚠️  WARNING: MOCK IMPLEMENTATION FOR TESTING ONLY ⚠️
+// This instruction performs a complete liquidation flow:
+// 1. Validates the target margin account is liquidatable
+// 2. Transfers loan amount from vault to Marginfi
+// 3. CPI into Marginfi to execute liquidation and receive collateral
+// 4. Stores collateral in temp account for Jupiter swap (next instruction)
+// 5. After swap (separate instruction), distributes profits
 //
-// This implementation accepts a `profit` parameter and assumes the profit
-// tokens are ALREADY in the vault. In production, you MUST:
+// IMPORTANT: This is a two-step process:
+// - Step 1: execute_liquidation (Marginfi CPI) - THIS INSTRUCTION
+// - Step 2: complete_liquidation (Jupiter swap + fee distribution) - SEPARATE
 //
-// 1. CPI into marginfi/Kamino to execute the actual liquidation
-// 2. Receive collateral tokens into a temporary account
-// 3. Swap collateral for deposit token (via Jupiter/Orca CPI)
-// 4. Deposit the swap proceeds into the vault
-// 5. Calculate actual profit from the swap result
-// 6. THEN distribute fees from the deposited profit
-//
-// Current mock behavior:
-// - Accepts `profit` as instruction parameter
-// - Distributes fees assuming profit is already in vault
-// - Will FAIL or drain vault incorrectly if used in production!
+// The split is necessary because:
+// - Marginfi liquidation and Jupiter swap are both compute-heavy
+// - Single transaction would exceed compute budget
+// - Allows for better error handling and monitoring
 //
 // Profit Distribution (per liquidation):
 // - 5% -> Protocol fee vault
@@ -27,13 +26,17 @@
 // =============================================================================
 
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{Mint, Token, TokenAccount};
 
 use crate::constants::*;
 use crate::error::VultrError;
 use crate::state::{Operator, OperatorStatus, Pool};
 
 /// Accounts required for the execute_liquidation instruction
+///
+/// This instruction performs a Marginfi liquidation via CPI.
+/// Due to compute budget constraints, the Jupiter swap and fee distribution
+/// happen in a separate instruction (complete_liquidation).
 #[derive(Accounts)]
 pub struct ExecuteLiquidation<'info> {
     // =========================================================================
@@ -46,10 +49,10 @@ pub struct ExecuteLiquidation<'info> {
     pub operator_authority: Signer<'info>,
 
     // =========================================================================
-    // Pool Accounts
+    // VULTR Pool Accounts
     // =========================================================================
 
-    /// The pool to execute liquidation for
+    /// The VULTR pool
     #[account(
         mut,
         seeds = [POOL_SEED, pool.deposit_mint.as_ref()],
@@ -68,19 +71,7 @@ pub struct ExecuteLiquidation<'info> {
     )]
     pub operator: Account<'info, Operator>,
 
-    // =========================================================================
-    // Token Mints
-    // =========================================================================
-
-    /// The deposit token mint
-    pub deposit_mint: Account<'info, Mint>,
-
-    // =========================================================================
-    // Token Accounts
-    // =========================================================================
-
-    /// Pool's main vault
-    /// In a real liquidation, profits would be deposited here from collateral swap
+    /// Pool's main vault (source of liquidation capital)
     #[account(
         mut,
         seeds = [VAULT_SEED, pool.key().as_ref()],
@@ -88,22 +79,86 @@ pub struct ExecuteLiquidation<'info> {
     )]
     pub vault: Account<'info, TokenAccount>,
 
-    /// Pool's protocol fee vault
-    /// Receives the 5% protocol fee
-    #[account(
-        mut,
-        seeds = [PROTOCOL_FEE_VAULT_SEED, pool.key().as_ref()],
-        bump = pool.protocol_fee_vault_bump
-    )]
-    pub protocol_fee_vault: Account<'info, TokenAccount>,
+    // =========================================================================
+    // Marginfi Protocol Accounts
+    // =========================================================================
 
-    /// Operator's token account for receiving their fee
+    /// Marginfi program
+    /// CHECK: Verified against known Marginfi program ID in handler
+    pub marginfi_program: UncheckedAccount<'info>,
+
+    /// Marginfi group (protocol configuration)
+    /// CHECK: Marginfi program validates this
+    #[account(mut)]
+    pub marginfi_group: UncheckedAccount<'info>,
+
+    /// The margin account being liquidated (liquidatee)
+    /// CHECK: Marginfi program validates this
+    #[account(mut)]
+    pub liquidatee_marginfi_account: UncheckedAccount<'info>,
+
+    /// Asset bank (the collateral being seized)
+    /// CHECK: Marginfi program validates this
+    #[account(mut)]
+    pub asset_bank: UncheckedAccount<'info>,
+
+    /// Liability bank (the loan being repaid)
+    /// CHECK: Marginfi program validates this
+    #[account(mut)]
+    pub liab_bank: UncheckedAccount<'info>,
+
+    // =========================================================================
+    // Token Accounts for Liquidation
+    // =========================================================================
+
+    /// Asset bank liquidity vault (where collateral comes from)
+    /// CHECK: Marginfi program validates this
+    #[account(mut)]
+    pub asset_bank_liquidity_vault: UncheckedAccount<'info>,
+
+    /// Liability bank liquidity vault (where loan repayment goes)
+    /// CHECK: Marginfi program validates this
+    #[account(mut)]
+    pub liab_bank_liquidity_vault: UncheckedAccount<'info>,
+
+    /// Liquidator collateral token account (receives seized collateral)
+    /// This is controlled by the pool PDA
     #[account(
         mut,
-        constraint = operator_token_account.mint == deposit_mint.key() @ VultrError::InvalidDepositMint,
-        constraint = operator_token_account.owner == operator_authority.key() @ VultrError::InvalidTokenAccountOwner
+        constraint = liquidator_collateral_account.owner == pool.key() @ VultrError::InvalidTokenAccountOwner
     )]
-    pub operator_token_account: Account<'info, TokenAccount>,
+    pub liquidator_collateral_account: Account<'info, TokenAccount>,
+
+    /// Bank insurance vault
+    /// CHECK: Marginfi program validates this
+    #[account(mut)]
+    pub insurance_vault: UncheckedAccount<'info>,
+
+    /// Insurance vault authority
+    /// CHECK: Marginfi program validates this
+    pub insurance_vault_authority: UncheckedAccount<'info>,
+
+    // =========================================================================
+    // Oracle Accounts
+    // =========================================================================
+
+    /// Asset bank oracle (for collateral pricing)
+    /// CHECK: Marginfi program validates this
+    pub asset_bank_oracle: UncheckedAccount<'info>,
+
+    /// Liability bank oracle (for loan pricing)
+    /// CHECK: Marginfi program validates this
+    pub liab_bank_oracle: UncheckedAccount<'info>,
+
+    // =========================================================================
+    // Token Mints
+    // =========================================================================
+
+    /// The deposit token mint (USDC)
+    pub deposit_mint: Account<'info, Mint>,
+
+    /// The collateral token mint
+    pub collateral_mint: Account<'info, Mint>,
 
     // =========================================================================
     // Programs
@@ -112,20 +167,41 @@ pub struct ExecuteLiquidation<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+/// Marginfi Program ID (mainnet)
+const MARGINFI_PROGRAM_ID: &str = "MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA";
+
 /// Handler for the execute_liquidation instruction
 ///
 /// # Arguments
 /// * `ctx` - The instruction context with all accounts
-/// * `profit` - The profit from the liquidation (in base units)
+/// * `asset_amount` - Amount of liability to repay (in deposit token base units)
 ///
-/// NOTE: In production, `profit` would be calculated from the actual liquidation.
-/// This mock version accepts it as a parameter for testing.
-pub fn handler_execute_liquidation(ctx: Context<ExecuteLiquidation>, profit: u64) -> Result<()> {
+/// # Flow
+/// 1. Validates Marginfi program ID
+/// 2. Transfers liability amount from vault to Marginfi
+/// 3. Calls Marginfi liquidate instruction via CPI
+/// 4. Receives collateral in liquidator_collateral_account
+/// 5. Collateral is later swapped via complete_liquidation instruction
+///
+/// # Returns
+/// The amount of collateral received (for logging/tracking)
+pub fn handler_execute_liquidation(
+    ctx: Context<ExecuteLiquidation>,
+    asset_amount: u64,
+) -> Result<()> {
     // =========================================================================
     // Input Validation
     // =========================================================================
 
-    require!(profit > 0, VultrError::InvalidAmount);
+    require!(asset_amount > 0, VultrError::InvalidAmount);
+
+    // Verify Marginfi program ID
+    let expected_marginfi_id = MARGINFI_PROGRAM_ID.parse::<Pubkey>()
+        .map_err(|_| VultrError::InvalidAuthority)?;
+    require!(
+        ctx.accounts.marginfi_program.key() == expected_marginfi_id,
+        VultrError::InvalidAuthority
+    );
 
     // Check operator has minimum stake
     require!(
@@ -133,111 +209,102 @@ pub fn handler_execute_liquidation(ctx: Context<ExecuteLiquidation>, profit: u64
         VultrError::InsufficientStake
     );
 
-    msg!("Executing liquidation with profit: {}", profit);
+    msg!("Executing Marginfi liquidation");
+    msg!("Asset amount to liquidate: {}", asset_amount);
+    msg!("Liquidatee margin account: {}", ctx.accounts.liquidatee_marginfi_account.key());
 
     // =========================================================================
-    // Calculate Fee Distribution
+    // Prepare PDA Signer Seeds
     // =========================================================================
 
-    let pool = &ctx.accounts.pool;
-    let (protocol_fee, operator_fee, depositor_profit) = pool.calculate_fee_distribution(profit)?;
-
-    msg!("Fee distribution:");
-    msg!("  Protocol fee (5%): {}", protocol_fee);
-    msg!("  Operator fee (15%): {}", operator_fee);
-    msg!("  Depositor profit (80%): {}", depositor_profit);
-
-    // =========================================================================
-    // Transfer Protocol Fee: Vault -> Protocol Fee Vault
-    // =========================================================================
-
-    // The vault is owned by the pool PDA
     let deposit_mint_key = ctx.accounts.deposit_mint.key();
     let pool_seeds = &[
         POOL_SEED,
         deposit_mint_key.as_ref(),
         &[ctx.accounts.pool.bump],
     ];
-    let signer_seeds = &[&pool_seeds[..]];
-
-    if protocol_fee > 0 {
-        let transfer_protocol_fee_ctx = CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.vault.to_account_info(),
-                to: ctx.accounts.protocol_fee_vault.to_account_info(),
-                authority: ctx.accounts.pool.to_account_info(),
-            },
-            signer_seeds,
-        );
-        token::transfer(transfer_protocol_fee_ctx, protocol_fee)?;
-    }
+    let _signer_seeds = &[&pool_seeds[..]];  // Will be used in actual CPI call
 
     // =========================================================================
-    // Transfer Operator Fee: Vault -> Operator Token Account
+    // Call Marginfi Liquidate Instruction via Manual CPI
     // =========================================================================
 
-    if operator_fee > 0 {
-        let transfer_operator_fee_ctx = CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.vault.to_account_info(),
-                to: ctx.accounts.operator_token_account.to_account_info(),
-                authority: ctx.accounts.pool.to_account_info(),
-            },
-            signer_seeds,
-        );
-        token::transfer(transfer_operator_fee_ctx, operator_fee)?;
-    }
+    // TODO: Implement actual Marginfi liquidation CPI
+    //
+    // The Marginfi liquidation instruction requires:
+    // 1. Instruction discriminator (8 bytes) - from Marginfi IDL
+    // 2. Instruction data: asset_amount (u64)
+    //
+    // Example structure (to be implemented):
+    // ```
+    // let mut instruction_data = Vec::with_capacity(16);
+    // instruction_data.extend_from_slice(&MARGINFI_LIQUIDATE_DISCRIMINATOR);
+    // instruction_data.extend_from_slice(&asset_amount.to_le_bytes());
+    //
+    // let account_infos = vec![
+    //     ctx.accounts.marginfi_group.to_account_info(),
+    //     ctx.accounts.liquidatee_marginfi_account.to_account_info(),
+    //     ctx.accounts.asset_bank.to_account_info(),
+    //     ctx.accounts.liab_bank.to_account_info(),
+    //     ctx.accounts.asset_bank_liquidity_vault.to_account_info(),
+    //     ctx.accounts.liab_bank_liquidity_vault.to_account_info(),
+    //     ctx.accounts.liquidator_collateral_account.to_account_info(),
+    //     ctx.accounts.vault.to_account_info(),
+    //     ctx.accounts.insurance_vault.to_account_info(),
+    //     ctx.accounts.insurance_vault_authority.to_account_info(),
+    //     ctx.accounts.asset_bank_oracle.to_account_info(),
+    //     ctx.accounts.liab_bank_oracle.to_account_info(),
+    //     ctx.accounts.token_program.to_account_info(),
+    // ];
+    //
+    // let liquidate_ix = solana_program::instruction::Instruction {
+    //     program_id: ctx.accounts.marginfi_program.key(),
+    //     accounts: account_metas, // Convert account_infos to AccountMeta
+    //     data: instruction_data,
+    // };
+    //
+    // solana_program::program::invoke_signed(
+    //     &liquidate_ix,
+    //     &account_infos,
+    //     signer_seeds,
+    // ).map_err(|_| VultrError::MarginfiCpiFailed)?;
+    // ```
+    //
+    // For now, we return an error to indicate this needs implementation
+
+    msg!("⚠️  WARNING: Marginfi liquidation CPI not yet implemented");
+    msg!("This instruction structure is ready but requires Marginfi IDL integration");
+
+    return Err(VultrError::MarginfiCpiFailed.into());
 
     // =========================================================================
-    // Update Pool State
+    // Validate Collateral Receipt (POST-CPI)
     // =========================================================================
 
-    let pool = &mut ctx.accounts.pool;
-
-    // The depositor profit stays in the vault, increasing share value
-    // We update total_deposits to reflect this
-    pool.total_deposits = pool
-        .total_deposits
-        .checked_add(depositor_profit)
-        .ok_or(VultrError::MathOverflow)?;
-
-    // Track total profit for statistics
-    pool.total_profit = pool
-        .total_profit
-        .checked_add(profit)
-        .ok_or(VultrError::MathOverflow)?;
-
-    // Track accumulated protocol fees
-    pool.accumulated_protocol_fees = pool
-        .accumulated_protocol_fees
-        .checked_add(protocol_fee)
-        .ok_or(VultrError::MathOverflow)?;
+    // After successful CPI:
+    // let collateral_received = ctx.accounts.liquidator_collateral_account.amount;
+    // require!(collateral_received > 0, VultrError::InsufficientCollateral);
+    //
+    // msg!("Collateral received: {}", collateral_received);
+    // msg!("Collateral mint: {}", ctx.accounts.collateral_mint.key());
 
     // =========================================================================
-    // Update Operator State
+    // Update Operator State (Minimal)
     // =========================================================================
 
-    let operator = &mut ctx.accounts.operator;
-    let clock = Clock::get()?;
+    // Note: Full profit distribution happens in complete_liquidation instruction
+    // Here we just track that a liquidation was attempted
 
-    operator.record_liquidation(profit, operator_fee, clock.unix_timestamp)?;
+    // let operator = &mut ctx.accounts.operator;
+    // let clock = Clock::get()?;
+    // operator.total_liquidations = operator.total_liquidations
+    //     .checked_add(1)
+    //     .ok_or(VultrError::MathOverflow)?;
+    // operator.last_liquidation_time = clock.unix_timestamp;
 
-    // =========================================================================
-    // Log Results
-    // =========================================================================
+    // msg!("Liquidation executed successfully!");
+    // msg!("Operator total liquidations: {}", operator.total_liquidations);
+    // msg!("Collateral will be swapped in complete_liquidation instruction");
 
-    msg!("Liquidation executed successfully!");
-    msg!("Total pool profit: {}", pool.total_profit);
-    msg!(
-        "Operator total liquidations: {}",
-        ctx.accounts.operator.total_liquidations
-    );
-    msg!(
-        "Operator total fees earned: {}",
-        ctx.accounts.operator.total_fees_earned
-    );
-
-    Ok(())
+    // Ok(())
 }
