@@ -51,15 +51,17 @@ pub struct CompleteLiquidation<'info> {
     // =========================================================================
 
     /// The VULTR pool
+    /// Boxed to reduce stack usage
     #[account(
         mut,
         seeds = [POOL_SEED, pool.deposit_mint.as_ref()],
         bump = pool.bump,
         constraint = !pool.is_paused @ VultrError::PoolPaused
     )]
-    pub pool: Account<'info, Pool>,
+    pub pool: Box<Account<'info, Pool>>,
 
     /// The Operator account (must be active)
+    /// Boxed to reduce stack usage
     #[account(
         mut,
         seeds = [OPERATOR_SEED, pool.key().as_ref(), operator_authority.key().as_ref()],
@@ -67,7 +69,7 @@ pub struct CompleteLiquidation<'info> {
         constraint = operator.authority == operator_authority.key() @ VultrError::Unauthorized,
         constraint = operator.status == OperatorStatus::Active @ VultrError::OperatorNotActive
     )]
-    pub operator: Account<'info, Operator>,
+    pub operator: Box<Account<'info, Operator>>,
 
     /// Pool's main vault (receives swapped USDC)
     #[account(
@@ -118,33 +120,17 @@ pub struct CompleteLiquidation<'info> {
     // =========================================================================
     // Jupiter Protocol Accounts
     // =========================================================================
+    // Note: Most Jupiter accounts are passed via remaining_accounts to reduce
+    // stack size and support variable swap routes. Only the program ID is
+    // explicitly defined here.
 
     /// Jupiter aggregator program
     /// CHECK: Verified against known Jupiter program ID in handler
     pub jupiter_program: UncheckedAccount<'info>,
 
-    /// Jupiter program authority
-    /// CHECK: Jupiter program validates this
-    pub jupiter_program_authority: UncheckedAccount<'info>,
-
-    /// Source token account for Jupiter (same as collateral_source)
-    /// CHECK: Jupiter validates this matches swap source
-    #[account(mut)]
-    pub jupiter_source_token_account: UncheckedAccount<'info>,
-
-    /// Destination token account for Jupiter (same as swap_destination)
-    /// CHECK: Jupiter validates this matches swap destination
-    #[account(mut)]
-    pub jupiter_destination_token_account: UncheckedAccount<'info>,
-
-    /// Jupiter swap state account
-    /// CHECK: Jupiter program validates this
-    #[account(mut)]
-    pub jupiter_swap_state: UncheckedAccount<'info>,
-
-    /// Jupiter event authority
-    /// CHECK: Jupiter program validates this
-    pub jupiter_event_authority: UncheckedAccount<'info>,
+    // Additional Jupiter accounts (program authority, swap state, event authority,
+    // DEX-specific accounts) should be passed via ctx.remaining_accounts.
+    // The specific accounts needed depend on the swap route chosen by Jupiter.
 
     // =========================================================================
     // Token Mints
@@ -250,28 +236,23 @@ pub fn handler_complete_liquidation(
     // let mut instruction_data = Vec::new();
     // instruction_data.extend_from_slice(&JUPITER_SWAP_DISCRIMINATOR);
     //
-    // // Serialize route plan (complex - contains DEX route information)
-    // let route_plan = build_route_plan(
-    //     ctx.accounts.collateral_mint.key(),
-    //     ctx.accounts.deposit_mint.key(),
-    //     collateral_amount,
-    // )?;
-    // instruction_data.extend_from_slice(&route_plan);
+    // // Serialize route plan (built off-chain by bot using Jupiter SDK)
+    // // Route plan is passed as instruction parameter: route_plan_data
+    // instruction_data.extend_from_slice(&route_plan_data);
     //
     // // Add swap parameters
     // instruction_data.extend_from_slice(&collateral_amount.to_le_bytes());
     // instruction_data.extend_from_slice(&min_output_amount.to_le_bytes());
     //
-    // let account_infos = vec![
+    // // Use remaining_accounts for Jupiter-specific accounts
+    // // These vary based on the swap route (different DEXes, pools, etc.)
+    // let mut account_infos = vec![
     //     ctx.accounts.jupiter_program.to_account_info(),
-    //     ctx.accounts.jupiter_program_authority.to_account_info(),
     //     ctx.accounts.collateral_source.to_account_info(),
     //     ctx.accounts.swap_destination.to_account_info(),
-    //     ctx.accounts.jupiter_swap_state.to_account_info(),
-    //     ctx.accounts.jupiter_event_authority.to_account_info(),
     //     ctx.accounts.token_program.to_account_info(),
-    //     // ... additional DEX accounts based on route
     // ];
+    // account_infos.extend(ctx.remaining_accounts.iter().cloned());
     //
     // let swap_ix = solana_program::instruction::Instruction {
     //     program_id: ctx.accounts.jupiter_program.key(),
@@ -286,11 +267,15 @@ pub fn handler_complete_liquidation(
     // ).map_err(|_| VultrError::JupiterCpiFailed)?;
     // ```
     //
-    // Alternative approach: Use Jupiter SDK to build the swap transaction
-    // off-chain and pass the serialized route data as an instruction parameter
+    // Recommended approach:
+    // 1. Bot uses Jupiter SDK to get quote and route
+    // 2. Bot passes serialized route as instruction parameter
+    // 3. Bot passes all required accounts via remaining_accounts
+    // 4. On-chain program executes CPI with provided route
 
     msg!("⚠️  WARNING: Jupiter swap CPI not yet implemented");
     msg!("This instruction structure is ready but requires Jupiter route building");
+    msg!("Remaining accounts provided: {}", ctx.remaining_accounts.len());
 
     // For now, simulate a successful swap for structure validation
     // In production, this section will be replaced with actual CPI
