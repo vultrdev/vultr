@@ -33,6 +33,12 @@ const DEFAULTS = {
   JITO_BLOCK_ENGINE_URL: "https://mainnet.block-engine.jito.wtf",
   DRY_RUN: true,
   LOG_LEVEL: "info" as const,
+  // Retry and rate limiting
+  RPC_RATE_LIMIT_MS: 100, // 100ms between RPC calls
+  RPC_MAX_RETRIES: 5, // Max 5 retries for RPC
+  RPC_BACKOFF_MS: 500, // Initial 500ms backoff
+  TX_CONFIRM_MAX_RETRIES: 30, // Max 30 retries for tx confirmation
+  TX_CONFIRM_TIMEOUT_MS: 60000, // 60s timeout for confirmations
 };
 
 // =============================================================================
@@ -92,6 +98,26 @@ export function loadConfig(): BotConfig {
       process.env.JITO_BLOCK_ENGINE_URL || DEFAULTS.JITO_BLOCK_ENGINE_URL,
     dryRun: process.env.DRY_RUN !== "false",
     logLevel: (process.env.LOG_LEVEL as BotConfig["logLevel"]) || DEFAULTS.LOG_LEVEL,
+    rpcRateLimitMs: parseInt(
+      process.env.RPC_RATE_LIMIT_MS || String(DEFAULTS.RPC_RATE_LIMIT_MS),
+      10
+    ),
+    rpcMaxRetries: parseInt(
+      process.env.RPC_MAX_RETRIES || String(DEFAULTS.RPC_MAX_RETRIES),
+      10
+    ),
+    rpcBackoffMs: parseInt(
+      process.env.RPC_BACKOFF_MS || String(DEFAULTS.RPC_BACKOFF_MS),
+      10
+    ),
+    txConfirmMaxRetries: parseInt(
+      process.env.TX_CONFIRM_MAX_RETRIES || String(DEFAULTS.TX_CONFIRM_MAX_RETRIES),
+      10
+    ),
+    txConfirmTimeoutMs: parseInt(
+      process.env.TX_CONFIRM_TIMEOUT_MS || String(DEFAULTS.TX_CONFIRM_TIMEOUT_MS),
+      10
+    ),
   };
 
   // Validate configuration

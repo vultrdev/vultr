@@ -274,7 +274,7 @@ export class PythOracleClient {
         throw new Error(`Jupiter API returned ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as any;
       const priceData = data.data?.[mint.toBase58()];
 
       if (!priceData || !priceData.price) {
@@ -283,7 +283,7 @@ export class PythOracleClient {
 
       const price: TokenPrice = {
         mint,
-        priceUsd: priceData.price,
+        priceUsd: priceData.price as number,
         confidence: 0.01, // Jupiter doesn't provide confidence
         timestamp: Date.now(),
         source: "jupiter",

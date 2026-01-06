@@ -19,6 +19,7 @@ import { BotConfig, BotState, LiquidationOpportunity, BotMetrics } from "./types
 import { MarginfiClient, generateMockPositions } from "./marginfi";
 import { LiquidationCalculator, formatOpportunity } from "./calculator";
 import { LiquidationExecutor } from "./executor";
+import { PythOracleClient } from "./oracle";
 import {
   Logger,
   formatCurrency,
@@ -38,6 +39,7 @@ class VultrBot {
   private config: BotConfig;
   private connection: Connection;
   private wallet: Keypair;
+  private oracle: PythOracleClient;
   private marginfi: MarginfiClient;
   private calculator: LiquidationCalculator;
   private executor: LiquidationExecutor;
@@ -73,15 +75,24 @@ class VultrBot {
       poolTvl: new BN(0),
     };
 
+    // Initialize oracle client
+    this.oracle = new PythOracleClient(
+      this.connection,
+      5000, // 5 second cache TTL
+      this.logger.child("Oracle")
+    );
+
     // Initialize clients
     this.marginfi = new MarginfiClient(
       this.connection,
+      this.oracle,
       this.logger.child("Marginfi")
     );
 
     this.calculator = new LiquidationCalculator(
       config,
       this.marginfi,
+      this.oracle,
       this.logger.child("Calculator")
     );
 
