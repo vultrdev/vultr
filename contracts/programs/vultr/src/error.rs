@@ -158,24 +158,48 @@ pub enum VultrError {
 
     // =========================================================================
     // Liquidation Errors (6070-6079)
-    // Reserved for production liquidation implementation
+    // For production liquidation via Marginfi + Jupiter
     // =========================================================================
 
-    /// The liquidation would not be profitable
-    #[msg("Liquidation is not profitable")]
-    LiquidationNotProfitable,
-
-    /// The position is not eligible for liquidation (health factor OK)
-    #[msg("Position is not liquidatable")]
+    /// The position is not eligible for liquidation (health factor > 1.0)
+    #[msg("Position is not liquidatable - health factor is healthy")]
     PositionNotLiquidatable,
+
+    /// Insufficient collateral received from Marginfi liquidation
+    #[msg("Insufficient collateral received from liquidation")]
+    InsufficientCollateral,
+
+    /// Slippage protection triggered - swap output below minimum
+    #[msg("Slippage tolerance exceeded - swap output too low")]
+    SlippageExceeded,
+
+    /// No profit generated from liquidation (or net loss)
+    #[msg("Invalid liquidation - no profit generated")]
+    NoProfit,
+
+    /// The provided margin account is invalid or not found
+    #[msg("Invalid Marginfi margin account")]
+    InvalidMarginAccount,
+
+    /// The collateral mint doesn't match expected token
+    #[msg("Invalid collateral mint")]
+    InvalidCollateralMint,
 
     /// Liquidation amount exceeds maximum allowed
     #[msg("Liquidation amount exceeds maximum")]
     LiquidationExceedsMax,
 
-    /// Slippage protection triggered - execution price too different from expected
-    #[msg("Slippage tolerance exceeded")]
-    SlippageExceeded,
+    /// Invalid slippage tolerance configuration
+    #[msg("Invalid slippage tolerance - must be <= 10%")]
+    InvalidSlippageTolerance,
+
+    /// Marginfi CPI call failed
+    #[msg("Marginfi liquidation CPI failed")]
+    MarginfiCpiFailed,
+
+    /// Jupiter swap CPI call failed
+    #[msg("Jupiter swap CPI failed")]
+    JupiterCpiFailed,
 
     // =========================================================================
     // Share Calculation Errors (6080-6089)
