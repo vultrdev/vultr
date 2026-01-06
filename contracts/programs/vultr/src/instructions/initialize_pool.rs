@@ -185,6 +185,16 @@ pub fn handler_initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
     // Admin can adjust via update_operator_cooldown instruction if needed.
     pool.operator_cooldown_seconds = 604_800;
 
+    // =========================================================================
+    // Liquidation Configuration
+    // =========================================================================
+
+    // Default to 3% slippage tolerance (300 BPS) for Jupiter swaps.
+    // This protects against MEV attacks and bad swap routes while allowing
+    // reasonable price impact for liquidations. Admin can adjust via
+    // update_slippage_tolerance instruction if needed.
+    pool.max_slippage_bps = 300;
+
     // Log success message
     msg!("VULTR Pool initialized successfully!");
     msg!("Pool: {}", pool.key());

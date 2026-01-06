@@ -175,6 +175,24 @@ pub mod vultr {
         instructions::admin::handler_update_operator_cooldown(ctx, cooldown_seconds)
     }
 
+    /// Update slippage tolerance for liquidations (admin only)
+    ///
+    /// # Arguments
+    /// * `max_slippage_bps` - Maximum slippage in basis points (0-1000)
+    ///   - 100 BPS = 1%
+    ///   - 300 BPS = 3% (recommended)
+    ///   - 1000 BPS = 10% (maximum)
+    ///
+    /// # Security
+    /// Slippage tolerance protects against MEV attacks and bad swap routes.
+    /// Setting it too high exposes the pool to price manipulation.
+    pub fn update_slippage_tolerance(
+        ctx: Context<UpdateSlippageTolerance>,
+        max_slippage_bps: u16,
+    ) -> Result<()> {
+        instructions::admin::handler_update_slippage_tolerance(ctx, max_slippage_bps)
+    }
+
     /// Withdraw accumulated protocol fees (admin only)
     ///
     /// Transfers all fees from protocol fee vault to admin's token account

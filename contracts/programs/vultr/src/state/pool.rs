@@ -38,8 +38,10 @@ use anchor_lang::prelude::*;
 /// - vault_bump: 1 byte
 /// - share_mint_bump: 1 byte
 /// - protocol_fee_vault_bump: 1 byte
-/// - _padding: 3 bytes (for alignment)
-/// Total: 8 + 220 = 228 bytes
+/// - operator_cooldown_seconds: 8 bytes
+/// - max_slippage_bps: 2 bytes
+/// - _padding: 1 byte (for alignment)
+/// Total: 8 + 230 = 238 bytes
 #[account]
 #[derive(InitSpace)]
 pub struct Pool {
@@ -147,6 +149,24 @@ pub struct Pool {
     ///
     /// This is configurable by the pool admin via an admin instruction.
     pub operator_cooldown_seconds: i64,
+
+    // =========================================================================
+    // Liquidation Configuration
+    // =========================================================================
+
+    /// Maximum allowed slippage for token swaps in basis points (BPS).
+    ///
+    /// When executing liquidations, collateral is swapped to the deposit token
+    /// via Jupiter. This field limits how much slippage is acceptable:
+    /// - 100 BPS = 1% slippage
+    /// - 300 BPS = 3% slippage (recommended default)
+    /// - 1000 BPS = 10% slippage (maximum allowed)
+    ///
+    /// If actual slippage exceeds this, the liquidation transaction will fail.
+    /// This protects against MEV attacks and bad swap routes.
+    ///
+    /// Configurable by admin via update_slippage_tolerance instruction.
+    pub max_slippage_bps: u16,
 }
 
 impl Pool {

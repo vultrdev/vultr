@@ -210,6 +210,79 @@ pub fn handler_update_operator_cooldown(
 }
 
 // =============================================================================
+// Update Slippage Tolerance
+// =============================================================================
+
+/// Accounts required for update_slippage_tolerance instruction
+#[derive(Accounts)]
+pub struct UpdateSlippageTolerance<'info> {
+    /// The admin must sign
+    #[account(
+        constraint = admin.key() == pool.admin @ VultrError::AdminOnly
+    )]
+    pub admin: Signer<'info>,
+
+    /// The pool to update
+    #[account(
+        mut,
+        seeds = [POOL_SEED, pool.deposit_mint.as_ref()],
+        bump = pool.bump
+    )]
+    pub pool: Account<'info, Pool>,
+}
+
+/// Handler for update_slippage_tolerance instruction
+///
+/// Updates the maximum allowed slippage for Jupiter swaps during liquidations.
+///
+/// # Arguments
+/// * `max_slippage_bps` - Maximum slippage in basis points (0-1000)
+///   - 100 BPS = 1%
+///   - 300 BPS = 3% (recommended)
+///   - 1000 BPS = 10% (maximum)
+///
+/// # Security
+/// Slippage tolerance protects against MEV attacks and bad swap routes.
+/// Setting it too high exposes the pool to price manipulation.
+pub fn handler_update_slippage_tolerance(
+    ctx: Context<UpdateSlippageTolerance>,
+    max_slippage_bps: u16,
+) -> Result<()> {
+    // =========================================================================
+    // Validation
+    // =========================================================================
+
+    // Maximum slippage is 10% (1000 BPS)
+    require!(
+        max_slippage_bps <= 1000,
+        VultrError::InvalidSlippageTolerance
+    );
+
+    // =========================================================================
+    // Update Pool State
+    // =========================================================================
+
+    let pool = &mut ctx.accounts.pool;
+    let old_slippage = pool.max_slippage_bps;
+    pool.max_slippage_bps = max_slippage_bps;
+
+    // =========================================================================
+    // Log Results
+    // =========================================================================
+
+    msg!(
+        "Slippage tolerance updated by admin {}: {} -> {} BPS ({:.2}% -> {:.2}%)",
+        ctx.accounts.admin.key(),
+        old_slippage,
+        max_slippage_bps,
+        old_slippage as f64 / 100.0,
+        max_slippage_bps as f64 / 100.0
+    );
+
+    Ok(())
+}
+
+// =============================================================================
 // Withdraw Protocol Fees
 // =============================================================================
 
