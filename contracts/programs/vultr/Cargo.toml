@@ -19,10 +19,21 @@ anchor-debug = []
 custom-heap = []
 custom-panic = []
 
+# Liquidation feature flag (for future use)
+# Both Marginfi and Jupiter use manual CPI (no external dependencies needed)
+liquidation = []
+
 
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 anchor-spl = "0.32.1"
+
+# External Program Integration via Manual CPI
+# Both Marginfi and Jupiter use manual CPI to avoid dependency conflicts
+# This is the most reliable approach for cross-program calls
+#
+# Marginfi Program ID: MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA
+# Jupiter Program ID: JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4
 
 
 [lints.rust]
