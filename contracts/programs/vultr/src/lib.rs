@@ -140,6 +140,7 @@ pub mod vultr {
     /// # Arguments
     /// * `min_output_amount` - Minimum USDC to receive (slippage protection)
     /// * `liquidation_cost` - Amount of USDC spent in Marginfi liquidation
+    /// * `jupiter_instruction_data` - Serialized Jupiter swap instruction (built off-chain by bot)
     ///
     /// # Flow
     /// 1. Reads collateral from execute_liquidation
@@ -150,14 +151,22 @@ pub mod vultr {
     ///
     /// # Notes
     /// - Must be called after execute_liquidation
+    /// - Jupiter instruction data is built off-chain using Jupiter SDK
+    /// - All Jupiter route accounts must be passed via remaining_accounts
     /// - Uses pool's max_slippage_bps for swap protection
     /// - Requires collateral_source account to have balance
     pub fn complete_liquidation(
         ctx: Context<CompleteLiquidation>,
         min_output_amount: u64,
         liquidation_cost: u64,
+        jupiter_instruction_data: Vec<u8>,
     ) -> Result<()> {
-        instructions::complete_liquidation::handler_complete_liquidation(ctx, min_output_amount, liquidation_cost)
+        instructions::complete_liquidation::handler_complete_liquidation(
+            ctx,
+            min_output_amount,
+            liquidation_cost,
+            jupiter_instruction_data,
+        )
     }
 
     // =========================================================================

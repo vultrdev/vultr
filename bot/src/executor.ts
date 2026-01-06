@@ -24,6 +24,7 @@ import {
 } from "@solana/spl-token";
 import { Program, AnchorProvider, Wallet, BN } from "@coral-xyz/anchor";
 import idl from "./idl/vultr.json";
+import { createJupiterApiClient, QuoteGetRequest, QuoteResponse } from "@jup-ag/api";
 
 import {
   BotConfig,
@@ -370,6 +371,20 @@ export class LiquidationExecutor {
     // Liquidation cost (amount spent in step 1)
     const liquidationCost = opportunity.debtToRepay.amount;
 
+    // Build Jupiter swap instruction off-chain
+    this.logger.info("Building Jupiter swap instruction...");
+    const collateralAmount = opportunity.collateralToSeize.amount;
+    const jupiterSwap = await this.buildJupiterSwapInstruction(
+      opportunity.collateralToSeize.mint,
+      this.config.depositMint,
+      collateralAmount,
+      300, // 3% slippage
+    );
+
+    this.logger.success(
+      `Jupiter route: ${jupiterSwap.accounts.length} accounts, ${jupiterSwap.instructionData.length} bytes`
+    );
+
     // Build transaction
     const tx = new Transaction();
 
@@ -381,7 +396,11 @@ export class LiquidationExecutor {
 
     // Build complete_liquidation instruction using Anchor
     const completeLiquidationIx = await this.program.methods
-      .completeLiquidation(minOutputAmount, liquidationCost)
+      .completeLiquidation(
+        minOutputAmount,
+        liquidationCost,
+        Array.from(jupiterSwap.instructionData), // Convert Buffer to number array for Anchor
+      )
       .accounts({
         operatorAuthority: this.wallet.publicKey,
         pool: poolPda,
@@ -396,8 +415,7 @@ export class LiquidationExecutor {
         collateralMint: opportunity.collateralToSeize.mint,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
-      // TODO: Add remaining_accounts for Jupiter swap route
-      // .remainingAccounts([...jupiterAccounts])
+      .remainingAccounts(jupiterSwap.accounts)
       .instruction();
 
     tx.add(completeLiquidationIx);
@@ -448,6 +466,91 @@ export class LiquidationExecutor {
         executionTimeMs,
         opportunity,
       };
+    }
+  }
+
+  // ===========================================================================
+  // Jupiter Swap Helper
+  // ===========================================================================
+
+  /**
+   * Build Jupiter swap instruction and get route accounts
+   *
+   * @param inputMint - Collateral token mint
+   * @param outputMint - Destination token mint (USDC)
+   * @param amount - Amount of input token to swap
+   * @param slippageBps - Slippage tolerance in basis points
+   * @returns Jupiter instruction data and account metas
+   */
+  private async buildJupiterSwapInstruction(
+    inputMint: PublicKey,
+    outputMint: PublicKey,
+    amount: BN,
+    slippageBps: number = 100, // 1% default
+  ): Promise<{ instructionData: Buffer; accounts: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[] }> {
+    this.logger.info("Building Jupiter swap instruction...");
+    this.logger.debug(`Input mint: ${inputMint.toBase58()}`);
+    this.logger.debug(`Output mint: ${outputMint.toBase58()}`);
+    this.logger.debug(`Amount: ${amount.toString()}`);
+    this.logger.debug(`Slippage: ${slippageBps} bps`);
+
+    try {
+      // Create Jupiter API client
+      const jupiterApi = createJupiterApiClient();
+
+      // Get quote from Jupiter
+      const quoteRequest: QuoteGetRequest = {
+        inputMint: inputMint.toBase58(),
+        outputMint: outputMint.toBase58(),
+        amount: amount.toNumber(),
+        slippageBps,
+      };
+
+      this.logger.debug("Fetching Jupiter quote...");
+      const quote: QuoteResponse = await jupiterApi.quoteGet(quoteRequest);
+
+      if (!quote) {
+        throw new Error("Failed to get Jupiter quote");
+      }
+
+      this.logger.success(
+        `Got Jupiter quote: ${quote.inAmount} ${inputMint.toBase58().slice(0, 8)}... → ${quote.outAmount} ${outputMint.toBase58().slice(0, 8)}...`
+      );
+
+      // Get swap instruction
+      this.logger.debug("Getting Jupiter swap instruction...");
+      const swapResult = await jupiterApi.swapInstructionsPost({
+        swapRequest: {
+          quoteResponse: quote,
+          userPublicKey: this.wallet.publicKey.toBase58(),
+          // Don't execute, just get the instruction
+          wrapAndUnwrapSol: true,
+        },
+      });
+
+      if (!swapResult || !swapResult.swapInstruction) {
+        throw new Error("Failed to get Jupiter swap instruction");
+      }
+
+      // Extract instruction data
+      const instructionData = Buffer.from(swapResult.swapInstruction.data, "base64");
+
+      // Extract account metas
+      const accounts = swapResult.swapInstruction.accounts.map((acc) => ({
+        pubkey: new PublicKey(acc.pubkey),
+        isSigner: acc.isSigner,
+        isWritable: acc.isWritable,
+      }));
+
+      this.logger.success(`Jupiter instruction built: ${instructionData.length} bytes, ${accounts.length} accounts`);
+
+      return {
+        instructionData,
+        accounts,
+      };
+    } catch (error) {
+      this.logger.error("Failed to build Jupiter swap instruction", error);
+      throw error;
     }
   }
 

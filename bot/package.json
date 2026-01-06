@@ -24,6 +24,7 @@
   "license": "MIT",
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
+    "@jup-ag/api": "^6.0.48",
     "@mrgnlabs/marginfi-client-v2": "^6.3.2",
     "@pythnetwork/client": "^2.22.1",
     "@solana/spl-token": "^0.4.9",

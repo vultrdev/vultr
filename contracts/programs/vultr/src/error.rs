@@ -132,6 +132,10 @@ pub enum VultrError {
     #[msg("Division by zero")]
     DivisionByZero,
 
+    /// Generic arithmetic error (overflow, underflow, etc.)
+    #[msg("Arithmetic error in calculation")]
+    ArithmeticError,
+
     // =========================================================================
     // Account Validation Errors (6060-6069)
     // =========================================================================
@@ -155,6 +159,14 @@ pub enum VultrError {
     /// Token account owner doesn't match expected owner
     #[msg("Invalid token account owner")]
     InvalidTokenAccountOwner,
+
+    /// Invalid or missing instruction data
+    #[msg("Invalid instruction data")]
+    InvalidInstruction,
+
+    /// Missing required accounts for operation
+    #[msg("Missing required accounts")]
+    MissingRequiredAccounts,
 
     // =========================================================================
     // Liquidation Errors (6070-6079)

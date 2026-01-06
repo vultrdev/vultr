@@ -22,6 +22,10 @@
 // =============================================================================
 
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::{
+    instruction::{AccountMeta, Instruction},
+    program::invoke_signed,
+};
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 use crate::constants::*;
@@ -155,6 +159,7 @@ pub struct CompleteLiquidation<'info> {
 /// * `ctx` - The instruction context with all accounts
 /// * `min_output_amount` - Minimum USDC to receive (slippage protection)
 /// * `liquidation_cost` - Amount of USDC spent in Marginfi liquidation
+/// * `jupiter_instruction_data` - Serialized Jupiter swap instruction data (built off-chain by bot)
 ///
 /// # Flow
 /// 1. Validates Jupiter program ID
@@ -171,6 +176,7 @@ pub fn handler_complete_liquidation(
     ctx: Context<CompleteLiquidation>,
     min_output_amount: u64,
     liquidation_cost: u64,
+    jupiter_instruction_data: Vec<u8>,
 ) -> Result<()> {
     // =========================================================================
     // Input Validation
@@ -219,67 +225,103 @@ pub fn handler_complete_liquidation(
     let signer_seeds = &[&pool_seeds[..]];
 
     // =========================================================================
-    // Call Jupiter Swap via Manual CPI
+    // Call Jupiter Swap via CPI
+    // =========================================================================
+    //
+    // Jupiter V6 swap flow:
+    // 1. Bot builds complete Jupiter swap instruction off-chain using Jupiter SDK
+    // 2. Bot passes instruction data as parameter: jupiter_instruction_data
+    // 3. Bot passes all route-specific accounts via ctx.remaining_accounts
+    // 4. We execute the CPI with pool PDA as signer (owner of collateral)
+    //
+    // The Jupiter instruction data includes:
+    // - Instruction discriminator
+    // - Route plan
+    // - Swap parameters (amounts, slippage)
+    //
+    // The remaining_accounts include all accounts needed for the specific route:
+    // - Token accounts for intermediate swaps
+    // - AMM/DEX program accounts
+    // - Oracle accounts
+    // - etc.
+
+    msg!("Executing Jupiter swap via CPI");
+    msg!("Jupiter instruction data length: {} bytes", jupiter_instruction_data.len());
+    msg!("Remaining accounts for swap route: {}", ctx.remaining_accounts.len());
+
+    // Validate we have instruction data
+    require!(
+        !jupiter_instruction_data.is_empty(),
+        VultrError::InvalidInstruction
+    );
+
+    // Validate we have remaining accounts for the route
+    require!(
+        !ctx.remaining_accounts.is_empty(),
+        VultrError::MissingRequiredAccounts
+    );
+
+    // Record balance before swap for profit calculation
+    let balance_before = ctx.accounts.swap_destination.amount;
+
+    // Build account metas from remaining_accounts
+    // The bot must pass these in the exact order Jupiter expects
+    let account_metas: Vec<AccountMeta> = ctx.remaining_accounts
+        .iter()
+        .map(|acc| {
+            if acc.is_writable {
+                AccountMeta::new(*acc.key, acc.is_signer)
+            } else {
+                AccountMeta::new_readonly(*acc.key, acc.is_signer)
+            }
+        })
+        .collect();
+
+    // Build Jupiter swap instruction
+    let swap_instruction = Instruction {
+        program_id: ctx.accounts.jupiter_program.key(),
+        accounts: account_metas,
+        data: jupiter_instruction_data,
+    };
+
+    // Collect all account infos for CPI
+    // We just pass the remaining_accounts directly since they contain all needed accounts
+    let account_infos = ctx.remaining_accounts;
+
+    // Execute Jupiter swap CPI with pool PDA as signer
+    invoke_signed(
+        &swap_instruction,
+        account_infos,
+        signer_seeds,
+    ).map_err(|e| {
+        msg!("Jupiter CPI failed: {:?}", e);
+        VultrError::JupiterCpiFailed
+    })?;
+
+    msg!("✓ Jupiter swap executed successfully");
+
+    // =========================================================================
+    // Read Swap Result
     // =========================================================================
 
-    // TODO: Implement actual Jupiter swap CPI
-    //
-    // Jupiter V6 uses a `shared_accounts_route_with_token_ledger` instruction
-    // The instruction requires:
-    // 1. Instruction discriminator (8 bytes) - from Jupiter IDL
-    // 2. Route plan (serialized swap route data)
-    // 3. Input amount (u64)
-    // 4. Minimum output amount (u64) - slippage protection
-    //
-    // Example structure (to be implemented):
-    // ```
-    // let mut instruction_data = Vec::new();
-    // instruction_data.extend_from_slice(&JUPITER_SWAP_DISCRIMINATOR);
-    //
-    // // Serialize route plan (built off-chain by bot using Jupiter SDK)
-    // // Route plan is passed as instruction parameter: route_plan_data
-    // instruction_data.extend_from_slice(&route_plan_data);
-    //
-    // // Add swap parameters
-    // instruction_data.extend_from_slice(&collateral_amount.to_le_bytes());
-    // instruction_data.extend_from_slice(&min_output_amount.to_le_bytes());
-    //
-    // // Use remaining_accounts for Jupiter-specific accounts
-    // // These vary based on the swap route (different DEXes, pools, etc.)
-    // let mut account_infos = vec![
-    //     ctx.accounts.jupiter_program.to_account_info(),
-    //     ctx.accounts.collateral_source.to_account_info(),
-    //     ctx.accounts.swap_destination.to_account_info(),
-    //     ctx.accounts.token_program.to_account_info(),
-    // ];
-    // account_infos.extend(ctx.remaining_accounts.iter().cloned());
-    //
-    // let swap_ix = solana_program::instruction::Instruction {
-    //     program_id: ctx.accounts.jupiter_program.key(),
-    //     accounts: account_metas, // Convert to AccountMeta
-    //     data: instruction_data,
-    // };
-    //
-    // solana_program::program::invoke_signed(
-    //     &swap_ix,
-    //     &account_infos,
-    //     signer_seeds,
-    // ).map_err(|_| VultrError::JupiterCpiFailed)?;
-    // ```
-    //
-    // Recommended approach:
-    // 1. Bot uses Jupiter SDK to get quote and route
-    // 2. Bot passes serialized route as instruction parameter
-    // 3. Bot passes all required accounts via remaining_accounts
-    // 4. On-chain program executes CPI with provided route
+    // Reload swap_destination account to get updated balance
+    ctx.accounts.swap_destination.reload()?;
+    let balance_after = ctx.accounts.swap_destination.amount;
 
-    msg!("⚠️  WARNING: Jupiter swap CPI not yet implemented");
-    msg!("This instruction structure is ready but requires Jupiter route building");
-    msg!("Remaining accounts provided: {}", ctx.remaining_accounts.len());
+    // Calculate USDC received from swap
+    let usdc_received = balance_after
+        .checked_sub(balance_before)
+        .ok_or(VultrError::ArithmeticError)?;
 
-    // For now, simulate a successful swap for structure validation
-    // In production, this section will be replaced with actual CPI
-    let usdc_received = min_output_amount; // Mock: assume we got exactly min amount
+    msg!("USDC received from swap: {}", usdc_received);
+
+    // Validate slippage protection
+    require!(
+        usdc_received >= min_output_amount,
+        VultrError::SlippageExceeded
+    );
+
+    msg!("✓ Slippage check passed (min: {}, actual: {})", min_output_amount, usdc_received);
 
     // =========================================================================
     // Calculate Profit
