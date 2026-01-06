@@ -32,6 +32,13 @@ import {
   BotState,
 } from "./types";
 import { Logger } from "./logger";
+import {
+  executeWithRetry,
+  RateLimiter,
+  LIQUIDATION_RETRY_CONFIG,
+  TX_CONFIRM_RETRY_CONFIG,
+  isRetryableError,
+} from "./retry";
 
 // =============================================================================
 // Constants
@@ -79,6 +86,7 @@ export class LiquidationExecutor {
   private logger: Logger;
   private state: BotState;
   private program: Program;
+  private rateLimiter: RateLimiter;
 
   constructor(
     connection: Connection,
@@ -92,6 +100,12 @@ export class LiquidationExecutor {
     this.config = config;
     this.state = state;
     this.logger = logger || new Logger("Executor");
+
+    // Initialize rate limiter for RPC calls
+    this.rateLimiter = new RateLimiter(
+      config.rpcRateLimitMs || 100, // Default 100ms between calls
+      this.logger
+    );
 
     // Initialize Anchor program
     const provider = new AnchorProvider(
@@ -128,24 +142,33 @@ export class LiquidationExecutor {
     }
 
     try {
-      // Step 1: Execute Marginfi liquidation
-      this.logger.info("Step 1/2: Executing Marginfi liquidation...");
-      const step1Sig = await this.executeMarginfiLiquidation(opportunity);
-      this.logger.success(`Step 1 complete: ${step1Sig}`);
+      // Execute with limited retries (liquidations are time-sensitive)
+      const result = await executeWithRetry(
+        async () => {
+          // Step 1: Execute Marginfi liquidation
+          this.logger.info("Step 1/2: Executing Marginfi liquidation...");
+          const step1Sig = await this.executeMarginfiLiquidation(opportunity);
+          this.logger.success(`Step 1 complete: ${step1Sig}`);
 
-      // Wait for confirmation
-      await this.connection.confirmTransaction(step1Sig, "confirmed");
+          // Wait for confirmation with retries
+          await this.waitForConfirmation(step1Sig);
 
-      // Step 2: Complete with Jupiter swap
-      this.logger.info("Step 2/2: Executing Jupiter swap and profit distribution...");
-      const step2Sig = await this.completeLiquidation(opportunity);
-      this.logger.success(`Step 2 complete: ${step2Sig}`);
+          // Step 2: Complete with Jupiter swap
+          this.logger.info("Step 2/2: Executing Jupiter swap and profit distribution...");
+          const step2Sig = await this.completeLiquidation(opportunity);
+          this.logger.success(`Step 2 complete: ${step2Sig}`);
+
+          return { step1Sig, step2Sig };
+        },
+        LIQUIDATION_RETRY_CONFIG,
+        this.logger
+      );
 
       const executionTimeMs = Date.now() - startTime;
 
       this.logger.success(`✅ 2-step liquidation successful!`);
-      this.logger.info(`  Step 1 (Marginfi): ${step1Sig}`);
-      this.logger.info(`  Step 2 (Jupiter):  ${step2Sig}`);
+      this.logger.info(`  Step 1 (Marginfi): ${result.step1Sig}`);
+      this.logger.info(`  Step 2 (Jupiter):  ${result.step2Sig}`);
 
       // Update state
       this.state.liquidationsSuccessful++;
@@ -154,7 +177,7 @@ export class LiquidationExecutor {
 
       return {
         success: true,
-        signature: step2Sig, // Return final signature
+        signature: result.step2Sig, // Return final signature
         actualProfit: opportunity.netProfit,
         gasCost: opportunity.estimatedGasCost,
         executionTimeMs,
@@ -165,7 +188,12 @@ export class LiquidationExecutor {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
 
-      this.logger.error(`Liquidation failed: ${errorMessage}`);
+      // Check if error is retryable
+      if (error instanceof Error && !isRetryableError(error)) {
+        this.logger.error(`Non-retryable error: ${errorMessage}`);
+      } else {
+        this.logger.error(`Liquidation failed after retries: ${errorMessage}`);
+      }
 
       return {
         success: false,
@@ -444,23 +472,54 @@ export class LiquidationExecutor {
   /**
    * Send transaction normally
    */
+  /**
+   * Send transaction with rate limiting and error handling
+   */
   private async sendTransaction(transaction: Transaction): Promise<string> {
-    // Set recent blockhash and fee payer
-    const { blockhash } = await this.connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = this.wallet.publicKey;
+    return await this.rateLimiter.execute(async () => {
+      // Set recent blockhash and fee payer
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = this.wallet.publicKey;
 
-    const signature = await sendAndConfirmTransaction(
-      this.connection,
-      transaction,
-      [this.wallet],
-      {
-        commitment: "confirmed",
-        maxRetries: 3,
-      }
+      // Sign transaction
+      transaction.sign(this.wallet);
+
+      // Send transaction
+      const signature = await this.connection.sendRawTransaction(
+        transaction.serialize(),
+        {
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
+        }
+      );
+
+      return signature;
+    });
+  }
+
+  /**
+   * Wait for transaction confirmation with retries
+   */
+  private async waitForConfirmation(signature: string): Promise<void> {
+    await executeWithRetry(
+      async () => {
+        const confirmation = await this.connection.confirmTransaction(
+          signature,
+          "confirmed"
+        );
+
+        if (confirmation.value.err) {
+          throw new Error(
+            `Transaction failed: ${JSON.stringify(confirmation.value.err)}`
+          );
+        }
+
+        this.logger.debug(`Transaction confirmed: ${signature}`);
+      },
+      TX_CONFIRM_RETRY_CONFIG,
+      this.logger
     );
-
-    return signature;
   }
 
   /**

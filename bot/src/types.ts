@@ -39,6 +39,16 @@ export interface BotConfig {
   dryRun: boolean;
   /** Log level */
   logLevel: "debug" | "info" | "warn" | "error";
+  /** Minimum time between RPC calls in milliseconds (rate limiting) */
+  rpcRateLimitMs: number;
+  /** Maximum number of retry attempts for RPC calls */
+  rpcMaxRetries: number;
+  /** Initial backoff delay for retries in milliseconds */
+  rpcBackoffMs: number;
+  /** Maximum retry attempts for transaction confirmations */
+  txConfirmMaxRetries: number;
+  /** Timeout for transaction confirmations in milliseconds */
+  txConfirmTimeoutMs: number;
 }
 
 // =============================================================================
