@@ -135,6 +135,31 @@ pub mod vultr {
         instructions::execute_liquidation::handler_execute_liquidation(ctx, asset_amount)
     }
 
+    /// Complete a liquidation by swapping collateral (Step 2 of 2-step process)
+    ///
+    /// # Arguments
+    /// * `min_output_amount` - Minimum USDC to receive (slippage protection)
+    /// * `liquidation_cost` - Amount of USDC spent in Marginfi liquidation
+    ///
+    /// # Flow
+    /// 1. Reads collateral from execute_liquidation
+    /// 2. Swaps collateral to USDC via Jupiter CPI
+    /// 3. Calculates profit: (USDC received - liquidation_cost)
+    /// 4. Distributes fees: 80% depositors, 15% operator, 5% protocol
+    /// 5. Updates pool and operator state
+    ///
+    /// # Notes
+    /// - Must be called after execute_liquidation
+    /// - Uses pool's max_slippage_bps for swap protection
+    /// - Requires collateral_source account to have balance
+    pub fn complete_liquidation(
+        ctx: Context<CompleteLiquidation>,
+        min_output_amount: u64,
+        liquidation_cost: u64,
+    ) -> Result<()> {
+        instructions::complete_liquidation::handler_complete_liquidation(ctx, min_output_amount, liquidation_cost)
+    }
+
     // =========================================================================
     // Admin Operations
     // =========================================================================

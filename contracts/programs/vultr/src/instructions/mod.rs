@@ -15,6 +15,7 @@ pub mod withdraw;
 // Operator operations
 pub mod deregister_operator;
 pub mod execute_liquidation;
+pub mod complete_liquidation;
 pub mod register_operator;
 pub mod request_operator_withdrawal;
 
@@ -24,6 +25,7 @@ pub mod admin;
 // Re-export everything from each module
 // The #[derive(Accounts)] macro generates helper types that need to be at crate root
 pub use admin::*;
+pub use complete_liquidation::*;
 pub use deregister_operator::*;
 pub use deposit::*;
 pub use execute_liquidation::*;
