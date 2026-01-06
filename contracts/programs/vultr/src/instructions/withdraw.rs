@@ -62,6 +62,9 @@ pub struct Withdraw<'info> {
     // =========================================================================
 
     /// The deposit token mint (e.g., USDC)
+    #[account(
+        constraint = deposit_mint.key() == pool.deposit_mint @ VultrError::InvalidDepositMint
+    )]
     pub deposit_mint: Account<'info, Mint>,
 
     /// The share token mint (VLTR)

@@ -107,6 +107,15 @@ pub mod vultr {
         instructions::deregister_operator::handler_deregister_operator(ctx)
     }
 
+    /// Request operator stake withdrawal (starts cooldown)
+    ///
+    /// This is step 1 of a 2-step flow:
+    /// 1) request_operator_withdrawal
+    /// 2) deregister_operator (after cooldown)
+    pub fn request_operator_withdrawal(ctx: Context<RequestOperatorWithdrawal>) -> Result<()> {
+        instructions::request_operator_withdrawal::handler_request_operator_withdrawal(ctx)
+    }
+
     /// Execute a liquidation (mock implementation for testing)
     ///
     /// # Arguments
@@ -153,6 +162,17 @@ pub mod vultr {
         depositor_share_bps: u16,
     ) -> Result<()> {
         instructions::admin::handler_update_fees(ctx, protocol_fee_bps, operator_fee_bps, depositor_share_bps)
+    }
+
+    /// Update operator cooldown (admin only)
+    ///
+    /// - 0 means immediate withdrawal is allowed once requested (good for devnet tests)
+    /// - Set to e.g. 7 days before mainnet launch
+    pub fn update_operator_cooldown(
+        ctx: Context<UpdateOperatorCooldown>,
+        cooldown_seconds: i64,
+    ) -> Result<()> {
+        instructions::admin::handler_update_operator_cooldown(ctx, cooldown_seconds)
     }
 
     /// Withdraw accumulated protocol fees (admin only)

@@ -64,11 +64,11 @@ export const BPS_DENOMINATOR = 10000;
 /** Minimum deposit amount: 1 USDC (1_000_000 with 6 decimals) */
 export const MIN_DEPOSIT_AMOUNT = 1_000_000n;
 
-/** Maximum single deposit: 10M USDC */
-export const MAX_DEPOSIT_AMOUNT = 10_000_000_000_000n;
+/** Maximum single deposit: 100M USDC */
+export const MAX_DEPOSIT_AMOUNT = 100_000_000_000_000n;
 
-/** Maximum pool size: 100M USDC */
-export const MAX_POOL_SIZE = 100_000_000_000_000n;
+/** Maximum pool size: 1B USDC */
+export const MAX_POOL_SIZE = 1_000_000_000_000_000n;
 
 /** Minimum operator stake: 10,000 USDC */
 export const MIN_OPERATOR_STAKE = 10_000_000_000n;

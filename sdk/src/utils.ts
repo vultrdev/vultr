@@ -123,19 +123,23 @@ export function percentToBps(percentage: number): number {
 /**
  * Calculate the current share price
  *
- * @param totalDeposits - Total deposits in the pool
- * @param totalProfit - Total profit accumulated
+ * ⚠️  IMPORTANT: In the VULTR protocol, pool.total_deposits already includes
+ * the depositor share (80%) of liquidation profits. When using pool state,
+ * pass new BN(0) for totalProfit to avoid double-counting!
+ *
+ * @param totalDeposits - Total deposits in the pool (includes depositor profits in VULTR)
+ * @param totalProfit - Additional profit to add (pass 0 when using VULTR pool state)
  * @param totalShares - Total shares outstanding
  * @returns Share price scaled by 1e6
  *
  * @example
  * ```typescript
+ * // Using VULTR pool state - pass 0 for profit (already included in deposits)
  * const price = calculateSharePrice(
- *   new BN(1_000_000_000_000), // 1M USDC
- *   new BN(100_000_000_000),   // 100K profit
- *   new BN(1_000_000_000_000)  // 1M shares
+ *   pool.totalDeposits,  // Already includes depositor profits
+ *   new BN(0),           // Don't add totalProfit - would double count!
+ *   pool.totalShares
  * );
- * // Returns BN representing 1.1 (1,100,000 scaled)
  * ```
  */
 export function calculateSharePrice(
@@ -367,6 +371,9 @@ export function formatRelativeTime(timestamp: BN): string {
  * Log pool state in a readable format
  *
  * @param pool - Pool data
+ *
+ * Note: total_deposits already includes depositor share of profits,
+ * so we pass 0 for totalProfit when calculating share price.
  */
 export function logPoolState(pool: {
   admin: PublicKey;
@@ -381,10 +388,11 @@ export function logPoolState(pool: {
 }): void {
   console.log("=== Pool State ===");
   console.log(`Admin: ${pool.admin.toBase58()}`);
-  console.log(`Total Deposits: ${formatTokenAmount(pool.totalDeposits)}`);
+  console.log(`Total Deposits (TVL): ${formatTokenAmount(pool.totalDeposits)}`);
   console.log(`Total Shares: ${formatTokenAmount(pool.totalShares, SHARE_DECIMALS)}`);
-  console.log(`Total Profit: ${formatTokenAmount(pool.totalProfit)}`);
-  console.log(`Share Price: ${formatSharePrice(calculateSharePrice(pool.totalDeposits, pool.totalProfit, pool.totalShares))}`);
+  console.log(`Lifetime Profit (stats): ${formatTokenAmount(pool.totalProfit)}`);
+  // Note: totalDeposits already includes depositor profits, so pass 0 for totalProfit
+  console.log(`Share Price: ${formatSharePrice(calculateSharePrice(pool.totalDeposits, new BN(0), pool.totalShares))}`);
   console.log(`Operator Count: ${pool.operatorCount}`);
   console.log(`Is Paused: ${pool.isPaused}`);
   console.log(`Fees: Protocol ${formatBps(pool.protocolFeeBps)}, Operator ${formatBps(pool.operatorFeeBps)}, Depositor ${formatBps(pool.depositorShareBps)}`);

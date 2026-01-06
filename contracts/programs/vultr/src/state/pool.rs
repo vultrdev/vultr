@@ -135,16 +135,30 @@ pub struct Pool {
 
     /// Bump seed for the protocol fee vault PDA
     pub protocol_fee_vault_bump: u8,
+
+    // =========================================================================
+    // Operator Withdrawal Configuration
+    // =========================================================================
+
+    /// Operator stake withdrawal cooldown in seconds.
+    ///
+    /// - 0 means immediate withdrawal is allowed once withdrawal is requested.
+    /// - On mainnet, set this to something meaningful (e.g., 7 * 24 * 60 * 60).
+    ///
+    /// This is configurable by the pool admin via an admin instruction.
+    pub operator_cooldown_seconds: i64,
 }
 
 impl Pool {
-    /// Calculate the current value of the pool (vault balance + any pending profits)
-    /// This is used to determine share price
+    /// Calculate the current value of the pool for share price calculations
+    ///
+    /// Note: `total_deposits` already includes the depositor share (80%) of
+    /// liquidation profits, which is added in execute_liquidation. The
+    /// `total_profit` field tracks lifetime statistics and should NOT be
+    /// added here to avoid double-counting.
     ///
     /// Returns: Total pool value in deposit token base units
     pub fn total_value(&self) -> u64 {
-        // For now, total value = total deposits
-        // In the future, we might add pending profits from ongoing liquidations
         self.total_deposits
     }
 

@@ -54,6 +54,9 @@ export interface Pool {
   vaultBump: number;
   shareMintBump: number;
   protocolFeeVaultBump: number;
+
+  /** Operator stake withdrawal cooldown in seconds (0 = immediate after request) */
+  operatorCooldownSeconds: BN;
 }
 
 /**
@@ -66,7 +69,7 @@ export interface Depositor {
   /** Owner of this depositor account */
   owner: PublicKey;
 
-  /** Total shares currently held by this depositor */
+  /** Total shares minted to this depositor (cumulative) */
   sharesMinted: BN;
   /** Cumulative amount deposited (lifetime) */
   totalDeposited: BN;
@@ -75,11 +78,7 @@ export interface Depositor {
 
   /** Number of deposits made */
   depositCount: number;
-  /** Number of withdrawals made */
-  withdrawalCount: number;
 
-  /** Timestamp of first deposit */
-  firstDepositTimestamp: BN;
   /** Timestamp of most recent deposit */
   lastDepositTimestamp: BN;
   /** Timestamp of most recent withdrawal */
@@ -124,6 +123,9 @@ export interface Operator {
   lastLiquidationTimestamp: BN;
   /** Timestamp when operator registered */
   registeredAt: BN;
+
+  /** Timestamp when operator requested stake withdrawal (0 if not requested) */
+  withdrawalRequestedAt: BN;
 
   /** Current operator status */
   status: OperatorStatus;

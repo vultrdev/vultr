@@ -161,18 +161,29 @@ impl Depositor {
         (self.total_withdrawn as i64) - (self.total_deposited as i64)
     }
 
-    /// Calculate how long the user has been depositing (time since first deposit)
+    /// Calculate time since the user's most recent deposit
     ///
     /// # Arguments
     /// * `current_timestamp` - Current unix timestamp
     ///
-    /// Returns: Duration in seconds, or 0 if never deposited
-    pub fn time_since_first_deposit(&self, current_timestamp: i64) -> i64 {
-        if self.deposit_count == 0 {
+    /// Returns: Duration in seconds since last deposit, or 0 if never deposited
+    pub fn time_since_last_deposit(&self, current_timestamp: i64) -> i64 {
+        if self.deposit_count == 0 || self.last_deposit_timestamp == 0 {
             return 0;
         }
-        // Note: last_deposit_timestamp is actually first deposit for count=1
-        // For proper "first deposit" tracking, you'd need a separate field
         current_timestamp.saturating_sub(self.last_deposit_timestamp)
+    }
+
+    /// Calculate time since the user's most recent withdrawal
+    ///
+    /// # Arguments
+    /// * `current_timestamp` - Current unix timestamp
+    ///
+    /// Returns: Duration in seconds since last withdrawal, or 0 if never withdrawn
+    pub fn time_since_last_withdrawal(&self, current_timestamp: i64) -> i64 {
+        if self.last_withdrawal_timestamp == 0 {
+            return 0;
+        }
+        current_timestamp.saturating_sub(self.last_withdrawal_timestamp)
     }
 }

@@ -84,6 +84,12 @@ interface VultrProgram {
         instruction: () => Promise<TransactionInstruction>;
       };
     };
+    requestOperatorWithdrawal(): {
+      accounts: (accounts: Record<string, PublicKey>) => {
+        rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
+        instruction: () => Promise<TransactionInstruction>;
+      };
+    };
     executeLiquidation(profit: BN): {
       accounts: (accounts: Record<string, PublicKey>) => {
         rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
@@ -101,6 +107,12 @@ interface VultrProgram {
       operatorFeeBps: number,
       depositorShareBps: number
     ): {
+      accounts: (accounts: Record<string, PublicKey>) => {
+        rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
+        instruction: () => Promise<TransactionInstruction>;
+      };
+    };
+    updateOperatorCooldown(cooldownSeconds: BN): {
       accounts: (accounts: Record<string, PublicKey>) => {
         rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
         instruction: () => Promise<TransactionInstruction>;
@@ -362,14 +374,17 @@ export class VultrClient {
    * @param pool - Pool account data
    * @param depositAmount - Amount to deposit
    * @returns Share calculation details
+   *
+   * Note: total_deposits already includes the depositor share (80%) of profits
+   * from liquidations. The total_profit field is for statistics only and should
+   * NOT be added to total_deposits to avoid double-counting.
    */
   public calculateShares(pool: Pool, depositAmount: BN): ShareCalculation {
-    const totalDeposits = pool.totalDeposits;
     const totalShares = pool.totalShares;
-    const totalProfit = pool.totalProfit;
 
-    // Total pool value = deposits + profit
-    const totalValue = totalDeposits.add(totalProfit);
+    // Total pool value = total_deposits (which already includes depositor profits)
+    // Do NOT add totalProfit here - it would double count!
+    const totalValue = pool.totalDeposits;
 
     let sharesToMint: BN;
     let sharePrice: BN;
@@ -402,17 +417,19 @@ export class VultrClient {
    * @param pool - Pool account data
    * @param sharesToBurn - Number of shares to burn
    * @returns Withdrawal calculation details
+   *
+   * Note: total_deposits already includes the depositor share (80%) of profits
+   * from liquidations. The total_profit field is for statistics only.
    */
   public calculateWithdrawal(
     pool: Pool,
     sharesToBurn: BN
   ): WithdrawalCalculation {
-    const totalDeposits = pool.totalDeposits;
     const totalShares = pool.totalShares;
-    const totalProfit = pool.totalProfit;
 
-    // Total pool value = deposits + profit
-    const totalValue = totalDeposits.add(totalProfit);
+    // Total pool value = total_deposits (which already includes depositor profits)
+    // Do NOT add totalProfit here - it would double count!
+    const totalValue = pool.totalDeposits;
 
     // withdrawal = (shares * total_value) / total_shares
     const withdrawalAmount = sharesToBurn.mul(totalValue).div(totalShares);
@@ -462,18 +479,22 @@ export class VultrClient {
    *
    * @param depositMint - The deposit token mint
    * @returns Pool statistics or null if pool doesn't exist
+   *
+   * Note: TVL is total_deposits which already includes depositor profits.
+   * total_profit is shown separately for statistics only.
    */
   public async getPoolStats(depositMint: PublicKey): Promise<PoolStats | null> {
     const pool = await this.getPool(depositMint);
     if (!pool) return null;
 
-    const totalValue = pool.totalDeposits.add(pool.totalProfit);
+    // TVL = total_deposits (already includes depositor share of profits)
+    const tvl = pool.totalDeposits;
     const sharePrice = pool.totalShares.isZero()
       ? new BN(1_000_000)
-      : totalValue.mul(new BN(1_000_000)).div(pool.totalShares);
+      : tvl.mul(new BN(1_000_000)).div(pool.totalShares);
 
     return {
-      tvl: totalValue,
+      tvl,
       totalShares: pool.totalShares,
       sharePrice,
       totalProfit: pool.totalProfit,
@@ -487,6 +508,8 @@ export class VultrClient {
    * @param depositMint - The deposit token mint
    * @param user - User's wallet
    * @returns User position or null
+   *
+   * Note: total_deposits already includes depositor profits from liquidations.
    */
   public async getUserPosition(
     depositMint: PublicKey,
@@ -511,7 +534,8 @@ export class VultrClient {
     }
 
     // Calculate current value
-    const totalValue = pool.totalDeposits.add(pool.totalProfit);
+    // total_deposits already includes depositor share of profits
+    const totalValue = pool.totalDeposits;
     const value = pool.totalShares.isZero()
       ? new BN(0)
       : shares.mul(totalValue).div(pool.totalShares);
@@ -806,6 +830,31 @@ export class VultrClient {
   // ===========================================================================
 
   /**
+   * Request operator withdrawal (starts cooldown)
+   *
+   * @param depositMint - The deposit token mint
+   * @returns Transaction signature
+   */
+  public async requestOperatorWithdrawal(
+    depositMint: PublicKey
+  ): Promise<TransactionSignature> {
+    if (!this.wallet) throw new Error("Wallet required");
+
+    const program = this.getProgram();
+    const poolPda = this.getPoolPda(depositMint);
+    const operatorPda = this.getOperatorPda(poolPda, this.wallet.publicKey);
+
+    return await program.methods
+      .requestOperatorWithdrawal()
+      .accounts({
+        authority: this.wallet.publicKey,
+        pool: poolPda,
+        operator: operatorPda,
+      })
+      .rpc(this.confirmOptions);
+  }
+
+  /**
    * Pause or unpause a pool (admin only)
    *
    * @param depositMint - The deposit token mint
@@ -852,6 +901,30 @@ export class VultrClient {
 
     return await program.methods
       .updateFees(protocolFeeBps, operatorFeeBps, depositorShareBps)
+      .accounts({
+        admin: this.wallet.publicKey,
+        pool: poolPda,
+      })
+      .rpc(this.confirmOptions);
+  }
+
+  /**
+   * Update operator cooldown (admin only)
+   *
+   * @param depositMint - The deposit token mint
+   * @param cooldownSeconds - Cooldown in seconds (0 = immediate after request)
+   */
+  public async updateOperatorCooldown(
+    depositMint: PublicKey,
+    cooldownSeconds: BN
+  ): Promise<TransactionSignature> {
+    if (!this.wallet) throw new Error("Wallet required");
+
+    const program = this.getProgram();
+    const poolPda = this.getPoolPda(depositMint);
+
+    return await program.methods
+      .updateOperatorCooldown(cooldownSeconds)
       .accounts({
         admin: this.wallet.publicKey,
         pool: poolPda,

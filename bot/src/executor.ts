@@ -283,7 +283,24 @@ export class LiquidationExecutor {
   /**
    * Build the execute_liquidation instruction
    *
-   * NOTE: In production, use Anchor's instruction builder with the IDL
+   * ⚠️  IMPORTANT: This uses a hardcoded instruction discriminator.
+   *
+   * In production, you should:
+   * 1. Import the generated IDL from target/types/vultr.ts
+   * 2. Use Anchor's Program class to build instructions:
+   *    ```typescript
+   *    import { Program } from "@coral-xyz/anchor";
+   *    import { Vultr } from "../target/types/vultr";
+   *
+   *    const program = new Program<Vultr>(idl, provider);
+   *    const ix = await program.methods
+   *      .executeLiquidation(profit)
+   *      .accounts({...})
+   *      .instruction();
+   *    ```
+   *
+   * The discriminator below is calculated as:
+   * sha256("global:execute_liquidation")[0..8]
    */
   private async buildExecuteLiquidationInstruction(
     opportunity: LiquidationOpportunity,
@@ -296,9 +313,10 @@ export class LiquidationExecutor {
     }
   ): Promise<TransactionInstruction> {
     // Instruction discriminator for execute_liquidation
-    // In production, derive this from the IDL
+    // ⚠️  HARDCODED - In production, use Anchor's instruction builder
+    // This discriminator may change if the instruction name changes!
+    // Regenerate with: sha256("global:execute_liquidation")[0..8]
     const EXECUTE_LIQUIDATION_DISCRIMINATOR = Buffer.from([
-      // This should be the actual discriminator from the IDL
       0x9d, 0x13, 0x07, 0x8f, 0x5b, 0x2a, 0x1c, 0x4e,
     ]);
 

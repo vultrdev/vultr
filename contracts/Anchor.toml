@@ -15,8 +15,11 @@ vultr = "2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Localnet"
-wallet = "~/.config/solana/id.json"
+cluster = "Devnet"
+wallet = "~/.config/solana/devnet.json"
 
 [scripts]
-test = "npx ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
+# NOTE: In some Windows/WSL setups, `npx` may resolve to `npx.cmd` and run in
+# Windows CMD, causing tool resolution failures. Running ts-mocha via `node`
+# directly is more robust across environments.
+test = "node ./node_modules/ts-mocha/bin/ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""

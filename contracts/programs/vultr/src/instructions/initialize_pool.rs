@@ -176,6 +176,15 @@ pub fn handler_initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
     pool.share_mint_bump = ctx.bumps.share_mint;
     pool.protocol_fee_vault_bump = ctx.bumps.protocol_fee_vault;
 
+    // =========================================================================
+    // Operator Withdrawal Configuration (devnet-friendly defaults)
+    // =========================================================================
+
+    // Default to 7 days (604,800 seconds) for production security.
+    // This prevents operators from executing malicious liquidations and immediately withdrawing.
+    // Admin can adjust via update_operator_cooldown instruction if needed.
+    pool.operator_cooldown_seconds = 604_800;
+
     // Log success message
     msg!("VULTR Pool initialized successfully!");
     msg!("Pool: {}", pool.key());

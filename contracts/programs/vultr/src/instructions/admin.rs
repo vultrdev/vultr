@@ -164,6 +164,52 @@ pub fn handler_update_fees(
 }
 
 // =============================================================================
+// Update Operator Cooldown
+// =============================================================================
+
+/// Accounts required for update_operator_cooldown instruction
+#[derive(Accounts)]
+pub struct UpdateOperatorCooldown<'info> {
+    /// The admin must sign
+    #[account(
+        constraint = admin.key() == pool.admin @ VultrError::AdminOnly
+    )]
+    pub admin: Signer<'info>,
+
+    /// The pool to update
+    #[account(
+        mut,
+        seeds = [POOL_SEED, pool.deposit_mint.as_ref()],
+        bump = pool.bump
+    )]
+    pub pool: Account<'info, Pool>,
+}
+
+/// Handler for update_operator_cooldown instruction
+///
+/// # Arguments
+/// * `cooldown_seconds` - Cooldown in seconds (0 = immediate after request)
+pub fn handler_update_operator_cooldown(
+    ctx: Context<UpdateOperatorCooldown>,
+    cooldown_seconds: i64,
+) -> Result<()> {
+    require!(cooldown_seconds >= 0, VultrError::InvalidAmount);
+
+    let pool = &mut ctx.accounts.pool;
+    let old = pool.operator_cooldown_seconds;
+    pool.operator_cooldown_seconds = cooldown_seconds;
+
+    msg!(
+        "Operator cooldown updated by admin {}: {}s -> {}s",
+        ctx.accounts.admin.key(),
+        old,
+        cooldown_seconds
+    );
+
+    Ok(())
+}
+
+// =============================================================================
 // Withdraw Protocol Fees
 // =============================================================================
 
@@ -241,6 +287,13 @@ pub fn handler_withdraw_protocol_fees(ctx: Context<WithdrawProtocolFees>) -> Res
     );
 
     token::transfer(transfer_ctx, amount)?;
+
+    // =========================================================================
+    // Reset Accumulated Fees Tracker
+    // =========================================================================
+
+    let pool = &mut ctx.accounts.pool;
+    pool.accumulated_protocol_fees = 0;
 
     // =========================================================================
     // Log Results

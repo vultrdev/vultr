@@ -76,6 +76,18 @@ pub enum VultrError {
     #[msg("Operator has pending liquidations")]
     OperatorHasPendingLiquidations,
 
+    /// Operator must request withdrawal before withdrawing stake
+    #[msg("Operator withdrawal has not been requested")]
+    OperatorWithdrawalNotRequested,
+
+    /// Operator is not in withdrawing state
+    #[msg("Operator is not withdrawing")]
+    OperatorNotWithdrawing,
+
+    /// Operator cooldown has not elapsed yet
+    #[msg("Operator cooldown has not elapsed")]
+    OperatorCooldownNotElapsed,
+
     // =========================================================================
     // Fee & Configuration Errors (6030-6039)
     // =========================================================================
@@ -146,6 +158,7 @@ pub enum VultrError {
 
     // =========================================================================
     // Liquidation Errors (6070-6079)
+    // Reserved for production liquidation implementation
     // =========================================================================
 
     /// The liquidation would not be profitable

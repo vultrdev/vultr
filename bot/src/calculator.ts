@@ -29,6 +29,11 @@ const LAMPORTS_PER_CU = 0.000001; // Micro-lamports per CU at priority
 // Swap slippage tolerance
 const SWAP_SLIPPAGE_BPS = 50; // 0.5%
 
+// SOL price for gas cost estimation
+// TODO: In production, fetch live SOL price from Pyth/Switchboard oracle
+// or Jupiter price API. This fallback is used when price fetch fails.
+const DEFAULT_SOL_PRICE_USD = 100;
+
 // =============================================================================
 // Liquidation Calculator
 // =============================================================================
@@ -243,10 +248,18 @@ export class LiquidationCalculator {
 
   /**
    * Calculate net profit after gas costs
+   *
+   * @param grossProfit - Gross profit in deposit tokens
+   * @param gasCostLamports - Gas cost in lamports
+   * @param solPriceUsd - SOL price in USD (optional, uses default if not provided)
    */
-  private calculateNetProfit(grossProfit: BN, gasCostLamports: number): BN {
-    // Convert gas cost to USDC (assuming SOL price ~$100)
-    const gasCostUsd = (gasCostLamports / 1e9) * 100;
+  private calculateNetProfit(
+    grossProfit: BN,
+    gasCostLamports: number,
+    solPriceUsd: number = DEFAULT_SOL_PRICE_USD
+  ): BN {
+    // Convert gas cost from lamports to USD, then to USDC base units
+    const gasCostUsd = (gasCostLamports / 1e9) * solPriceUsd;
     const gasCostUsdc = new BN(Math.floor(gasCostUsd * 1e6));
 
     return grossProfit.sub(gasCostUsdc);
@@ -254,12 +267,17 @@ export class LiquidationCalculator {
 
   /**
    * Calculate net profit in USD
+   *
+   * @param grossProfitUsd - Gross profit in USD
+   * @param gasCostLamports - Gas cost in lamports
+   * @param solPriceUsd - SOL price in USD (optional, uses default if not provided)
    */
   private calculateNetProfitUsd(
     grossProfitUsd: number,
-    gasCostLamports: number
+    gasCostLamports: number,
+    solPriceUsd: number = DEFAULT_SOL_PRICE_USD
   ): number {
-    const gasCostUsd = (gasCostLamports / 1e9) * 100;
+    const gasCostUsd = (gasCostLamports / 1e9) * solPriceUsd;
     return grossProfitUsd - gasCostUsd;
   }
 

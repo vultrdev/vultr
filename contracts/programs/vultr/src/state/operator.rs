@@ -105,6 +105,10 @@ pub struct Operator {
     /// Used for seniority/loyalty calculations
     pub registered_at: i64,
 
+    /// Unix timestamp when the operator requested stake withdrawal.
+    /// 0 means no withdrawal has been requested.
+    pub withdrawal_requested_at: i64,
+
     // =========================================================================
     // Status
     // =========================================================================

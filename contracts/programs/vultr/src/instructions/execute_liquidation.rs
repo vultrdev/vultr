@@ -3,13 +3,22 @@
 // =============================================================================
 // Allows registered operators to execute liquidations and earn fees.
 //
-// This is a MOCK implementation for testing. In production, this would:
-// 1. CPI into marginfi to execute actual liquidation
-// 2. Receive collateral tokens
-// 3. Swap collateral for deposit token (via Jupiter/Orca)
-// 4. Calculate actual profit
+// ⚠️  WARNING: MOCK IMPLEMENTATION FOR TESTING ONLY ⚠️
 //
-// For now, this simulates a liquidation with a provided profit amount.
+// This implementation accepts a `profit` parameter and assumes the profit
+// tokens are ALREADY in the vault. In production, you MUST:
+//
+// 1. CPI into marginfi/Kamino to execute the actual liquidation
+// 2. Receive collateral tokens into a temporary account
+// 3. Swap collateral for deposit token (via Jupiter/Orca CPI)
+// 4. Deposit the swap proceeds into the vault
+// 5. Calculate actual profit from the swap result
+// 6. THEN distribute fees from the deposited profit
+//
+// Current mock behavior:
+// - Accepts `profit` as instruction parameter
+// - Distributes fees assuming profit is already in vault
+// - Will FAIL or drain vault incorrectly if used in production!
 //
 // Profit Distribution (per liquidation):
 // - 5% -> Protocol fee vault

@@ -402,6 +402,11 @@ describe("VULTR Protocol", () => {
       );
       assert.equal(pool.isPaused, false, "Pool should not be paused");
       assert.equal(pool.operatorCount, 0, "Operator count should be 0");
+      assert.equal(
+        pool.operatorCooldownSeconds.toNumber(),
+        0,
+        "Operator cooldown should default to 0 for testing"
+      );
     });
 
     it("should fail to initialize pool twice", async () => {
@@ -1275,6 +1280,19 @@ describe("VULTR Protocol", () => {
         connection,
         operator1DepositAccount
       );
+
+      // Step 1: request withdrawal (cooldown defaults to 0 in tests)
+      const requestTx = await program.methods
+        .requestOperatorWithdrawal()
+        .accounts({
+          authority: operator1.publicKey,
+          pool: poolPDA,
+          operator: operatorPDA,
+        })
+        .signers([operator1])
+        .rpc();
+
+      console.log("Request operator withdrawal tx:", requestTx);
 
       const tx = await program.methods
         .deregisterOperator()

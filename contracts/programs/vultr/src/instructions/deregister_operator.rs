@@ -3,15 +3,17 @@
 // =============================================================================
 // Allows an operator to leave the protocol and recover their stake.
 //
-// Flow:
-// 1. Operator calls deregister
-// 2. Stake is transferred back from vault to operator
-// 3. Operator account is closed (rent returned to operator)
-// 4. Pool operator count is decremented
+// Two-step withdrawal process:
+// 1. Operator calls `request_operator_withdrawal` (sets status to Withdrawing, records timestamp)
+// 2. After cooldown period elapses, operator calls `deregister_operator`
+// 3. Stake is transferred back from vault to operator
+// 4. Operator account is closed (rent returned to operator)
+// 5. Pool operator count is decremented
 //
-// Future improvements:
-// - Add cooldown period before stake can be withdrawn
-// - Check for pending liquidations
+// Security:
+// - Cooldown period (default 7 days, configurable by admin) prevents operators from executing
+//   malicious liquidations and immediately withdrawing before potential slashing.
+// - Operator must have OperatorStatus::Withdrawing and cooldown must have elapsed.
 // =============================================================================
 
 use anchor_lang::prelude::*;
@@ -19,7 +21,7 @@ use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 use crate::constants::*;
 use crate::error::VultrError;
-use crate::state::{Operator, Pool};
+use crate::state::{Operator, OperatorStatus, Pool};
 
 /// Accounts required for the deregister_operator instruction
 #[derive(Accounts)]
@@ -100,6 +102,26 @@ pub fn handler_deregister_operator(ctx: Context<DeregisterOperator>) -> Result<(
     // =========================================================================
     // Validation
     // =========================================================================
+
+    // Must have requested withdrawal first
+    require!(
+        operator.status == OperatorStatus::Withdrawing,
+        VultrError::OperatorNotWithdrawing
+    );
+    require!(
+        operator.withdrawal_requested_at > 0,
+        VultrError::OperatorWithdrawalNotRequested
+    );
+
+    // Enforce cooldown
+    let clock = Clock::get()?;
+    let elapsed = clock
+        .unix_timestamp
+        .saturating_sub(operator.withdrawal_requested_at);
+    require!(
+        elapsed >= ctx.accounts.pool.operator_cooldown_seconds,
+        VultrError::OperatorCooldownNotElapsed
+    );
 
     // Check vault has sufficient funds to return stake
     require!(

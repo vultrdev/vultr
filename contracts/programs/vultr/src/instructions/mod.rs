@@ -16,6 +16,7 @@ pub mod withdraw;
 pub mod deregister_operator;
 pub mod execute_liquidation;
 pub mod register_operator;
+pub mod request_operator_withdrawal;
 
 // Admin operations
 pub mod admin;
@@ -28,4 +29,5 @@ pub use deposit::*;
 pub use execute_liquidation::*;
 pub use initialize_pool::*;
 pub use register_operator::*;
+pub use request_operator_withdrawal::*;
 pub use withdraw::*;

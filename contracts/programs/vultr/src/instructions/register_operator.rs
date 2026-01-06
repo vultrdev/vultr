@@ -149,6 +149,7 @@ pub fn handler_register_operator(ctx: Context<RegisterOperator>, stake_amount: u
     operator.total_fees_earned = 0;
     operator.last_liquidation_timestamp = 0;
     operator.registered_at = clock.unix_timestamp;
+    operator.withdrawal_requested_at = 0;
     operator.status = OperatorStatus::Active;
     operator.bump = ctx.bumps.operator;
 
