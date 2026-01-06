@@ -1,8 +1,9 @@
 // =============================================================================
-// Liquidation Executor
+// Liquidation Executor (Updated for 2-Step Liquidation)
 // =============================================================================
-// Executes liquidations through the VULTR pool with optional Jito bundles
-// for MEV protection.
+// Executes liquidations through the VULTR pool using a 2-step process:
+// 1. execute_liquidation: Marginfi CPI to liquidate position
+// 2. complete_liquidation: Jupiter swap + profit distribution
 // =============================================================================
 
 import {
@@ -21,7 +22,8 @@ import {
   createAssociatedTokenAccountInstruction,
   getAccount,
 } from "@solana/spl-token";
-import BN from "bn.js";
+import { Program, AnchorProvider, Wallet, BN } from "@coral-xyz/anchor";
+import idl from "./idl/vultr.json";
 
 import {
   BotConfig,
@@ -53,12 +55,22 @@ const JITO_TIP_ACCOUNTS = [
   "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
 ].map((s) => new PublicKey(s));
 
+// Marginfi Program ID
+const MARGINFI_PROGRAM_ID = new PublicKey(
+  "MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA"
+);
+
+// Jupiter Program ID
+const JUPITER_PROGRAM_ID = new PublicKey(
+  "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+);
+
 // =============================================================================
 // Liquidation Executor
 // =============================================================================
 
 /**
- * Executor for liquidation transactions
+ * Executor for liquidation transactions using 2-step process
  */
 export class LiquidationExecutor {
   private connection: Connection;
@@ -66,6 +78,7 @@ export class LiquidationExecutor {
   private config: BotConfig;
   private logger: Logger;
   private state: BotState;
+  private program: Program;
 
   constructor(
     connection: Connection,
@@ -79,14 +92,25 @@ export class LiquidationExecutor {
     this.config = config;
     this.state = state;
     this.logger = logger || new Logger("Executor");
+
+    // Initialize Anchor program
+    const provider = new AnchorProvider(
+      connection,
+      new Wallet(wallet),
+      { commitment: "confirmed" }
+    );
+    this.program = new Program(idl as any, provider);
   }
 
   // ===========================================================================
-  // Liquidation Execution
+  // Liquidation Execution (2-Step Process)
   // ===========================================================================
 
   /**
-   * Execute a liquidation opportunity
+   * Execute a liquidation opportunity using 2-step process
+   *
+   * Step 1: execute_liquidation (Marginfi CPI)
+   * Step 2: complete_liquidation (Jupiter swap + fee distribution)
    *
    * @param opportunity - The opportunity to execute
    * @returns Result of the liquidation attempt
@@ -95,7 +119,7 @@ export class LiquidationExecutor {
     const startTime = Date.now();
 
     this.logger.info(
-      `Executing liquidation for ${opportunity.position.accountAddress.toBase58().slice(0, 8)}...`
+      `Executing 2-step liquidation for ${opportunity.position.accountAddress.toBase58().slice(0, 8)}...`
     );
 
     // Check if dry run
@@ -104,21 +128,24 @@ export class LiquidationExecutor {
     }
 
     try {
-      // Build the liquidation transaction
-      const transaction = await this.buildLiquidationTransaction(opportunity);
+      // Step 1: Execute Marginfi liquidation
+      this.logger.info("Step 1/2: Executing Marginfi liquidation...");
+      const step1Sig = await this.executeMarginfiLiquidation(opportunity);
+      this.logger.success(`Step 1 complete: ${step1Sig}`);
 
-      // Send transaction
-      let signature: string;
+      // Wait for confirmation
+      await this.connection.confirmTransaction(step1Sig, "confirmed");
 
-      if (this.config.useJito) {
-        signature = await this.sendWithJito(transaction);
-      } else {
-        signature = await this.sendTransaction(transaction);
-      }
+      // Step 2: Complete with Jupiter swap
+      this.logger.info("Step 2/2: Executing Jupiter swap and profit distribution...");
+      const step2Sig = await this.completeLiquidation(opportunity);
+      this.logger.success(`Step 2 complete: ${step2Sig}`);
 
       const executionTimeMs = Date.now() - startTime;
 
-      this.logger.success(`Liquidation successful: ${signature}`);
+      this.logger.success(`✅ 2-step liquidation successful!`);
+      this.logger.info(`  Step 1 (Marginfi): ${step1Sig}`);
+      this.logger.info(`  Step 2 (Jupiter):  ${step2Sig}`);
 
       // Update state
       this.state.liquidationsSuccessful++;
@@ -127,8 +154,8 @@ export class LiquidationExecutor {
 
       return {
         success: true,
-        signature,
-        actualProfit: opportunity.netProfit, // In production, calculate from tx result
+        signature: step2Sig, // Return final signature
+        actualProfit: opportunity.netProfit,
         gasCost: opportunity.estimatedGasCost,
         executionTimeMs,
         opportunity,
@@ -152,65 +179,114 @@ export class LiquidationExecutor {
   }
 
   /**
-   * Simulate a liquidation (dry run mode)
-   */
-  private async simulateLiquidation(
-    opportunity: LiquidationOpportunity,
-    startTime: number
-  ): Promise<LiquidationResult> {
-    this.logger.info("[DRY RUN] Simulating liquidation...");
-
-    // Simulate some processing time
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    // Randomly succeed or fail for realistic simulation
-    const success = Math.random() > 0.1; // 90% success rate
-
-    const executionTimeMs = Date.now() - startTime;
-
-    if (success) {
-      this.logger.success("[DRY RUN] Liquidation simulation successful");
-      return {
-        success: true,
-        signature: `sim_${Date.now().toString(36)}`,
-        actualProfit: opportunity.netProfit,
-        gasCost: opportunity.estimatedGasCost,
-        executionTimeMs,
-        opportunity,
-      };
-    } else {
-      this.logger.warn("[DRY RUN] Liquidation simulation failed");
-      return {
-        success: false,
-        error: "Simulated failure",
-        executionTimeMs,
-        opportunity,
-      };
-    }
-  }
-
-  // ===========================================================================
-  // Transaction Building
-  // ===========================================================================
-
-  /**
-   * Build a liquidation transaction
+   * Step 1: Execute Marginfi liquidation
    *
-   * This builds a transaction that:
-   * 1. Calls the VULTR execute_liquidation instruction
-   * 2. (In production) Also includes CPI to marginfi for actual liquidation
+   * This calls execute_liquidation which:
+   * - Transfers USDC from vault to Marginfi
+   * - CPIs to Marginfi.liquidate()
+   * - Receives collateral in pool-controlled account
    */
-  private async buildLiquidationTransaction(
+  private async executeMarginfiLiquidation(
     opportunity: LiquidationOpportunity
-  ): Promise<Transaction> {
-    const transaction = new Transaction();
+  ): Promise<string> {
+    // Get PDAs
+    const [poolPda] = PublicKey.findProgramAddressSync(
+      [POOL_SEED, this.config.depositMint.toBuffer()],
+      this.config.vultrProgramId
+    );
 
-    // Add compute budget instructions for priority
-    transaction.add(
+    const [vaultPda] = PublicKey.findProgramAddressSync(
+      [VAULT_SEED, poolPda.toBuffer()],
+      this.config.vultrProgramId
+    );
+
+    const [operatorPda] = PublicKey.findProgramAddressSync(
+      [OPERATOR_SEED, poolPda.toBuffer(), this.wallet.publicKey.toBuffer()],
+      this.config.vultrProgramId
+    );
+
+    // TODO: Get actual Marginfi accounts from opportunity
+    // For now, using placeholders
+    const marginfiGroup = new PublicKey("11111111111111111111111111111111");
+    const liquidateeMarginfiAccount = opportunity.position.accountAddress;
+    const assetBank = new PublicKey("11111111111111111111111111111111");
+    const liabBank = new PublicKey("11111111111111111111111111111111");
+    const assetBankLiquidityVault = new PublicKey("11111111111111111111111111111111");
+    const liabBankLiquidityVault = new PublicKey("11111111111111111111111111111111");
+
+    // Collateral account (pool-controlled)
+    const liquidatorCollateralAccount = await getAssociatedTokenAddress(
+      opportunity.collateralToSeize.mint,
+      poolPda,
+      true // allowOwnerOffCurve
+    );
+
+    const insuranceVault = new PublicKey("11111111111111111111111111111111");
+    const insuranceVaultAuthority = new PublicKey("11111111111111111111111111111111");
+    const assetBankOracle = new PublicKey("11111111111111111111111111111111");
+    const liabBankOracle = new PublicKey("11111111111111111111111111111111");
+
+    // Asset amount to liquidate (liability to repay)
+    const assetAmount = opportunity.debtToRepay.amount;
+
+    // Build transaction
+    const tx = new Transaction();
+
+    // Add compute budget
+    tx.add(
       ComputeBudgetProgram.setComputeUnitLimit({ units: 400000 }),
       ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 })
     );
 
+    // Build execute_liquidation instruction using Anchor
+    const executeLiquidationIx = await this.program.methods
+      .executeLiquidation(assetAmount)
+      .accounts({
+        operatorAuthority: this.wallet.publicKey,
+        pool: poolPda,
+        operator: operatorPda,
+        vault: vaultPda,
+        marginfiProgram: MARGINFI_PROGRAM_ID,
+        marginfiGroup,
+        liquidateeMarginfiAccount,
+        assetBank,
+        liabBank,
+        assetBankLiquidityVault,
+        liabBankLiquidityVault,
+        liquidatorCollateralAccount,
+        insuranceVault,
+        insuranceVaultAuthority,
+        assetBankOracle,
+        liabBankOracle,
+        depositMint: this.config.depositMint,
+        collateralMint: opportunity.collateralToSeize.mint,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .instruction();
+
+    tx.add(executeLiquidationIx);
+
+    // Add Jito tip if enabled
+    if (this.config.useJito) {
+      tx.add(this.buildJitoTipInstruction());
+    }
+
+    // Send transaction
+    const signature = await this.sendTransaction(tx);
+    return signature;
+  }
+
+  /**
+   * Step 2: Complete liquidation with Jupiter swap
+   *
+   * This calls complete_liquidation which:
+   * - Swaps collateral to USDC via Jupiter
+   * - Calculates profit
+   * - Distributes fees (80/15/5)
+   */
+  private async completeLiquidation(
+    opportunity: LiquidationOpportunity
+  ): Promise<string> {
     // Get PDAs
     const [poolPda] = PublicKey.findProgramAddressSync(
       [POOL_SEED, this.config.depositMint.toBuffer()],
@@ -232,124 +308,123 @@ export class LiquidationExecutor {
       this.config.vultrProgramId
     );
 
-    // Get operator's token account
+    // Operator token account
     const operatorTokenAccount = await getAssociatedTokenAddress(
       this.config.depositMint,
       this.wallet.publicKey
     );
 
-    // Ensure operator token account exists
-    try {
-      await getAccount(this.connection, operatorTokenAccount);
-    } catch {
-      transaction.add(
-        createAssociatedTokenAccountInstruction(
-          this.wallet.publicKey,
-          operatorTokenAccount,
-          this.wallet.publicKey,
-          this.config.depositMint
-        )
-      );
-    }
-
-    // Build execute_liquidation instruction
-    // In production, this would be built using Anchor's instruction builder
-    const executeLiquidationIx = await this.buildExecuteLiquidationInstruction(
-      opportunity,
-      {
-        pool: poolPda,
-        vault: vaultPda,
-        operator: operatorPda,
-        protocolFeeVault: protocolFeeVaultPda,
-        operatorTokenAccount,
-      }
+    // Collateral source (received from Marginfi)
+    const collateralSource = await getAssociatedTokenAddress(
+      opportunity.collateralToSeize.mint,
+      poolPda,
+      true
     );
 
-    transaction.add(executeLiquidationIx);
+    // Swap destination (temporary USDC account)
+    const swapDestination = await getAssociatedTokenAddress(
+      this.config.depositMint,
+      poolPda,
+      true
+    );
+
+    // Slippage protection
+    const minOutputAmount = opportunity.estimatedProfit
+      .mul(new BN(97)) // 3% slippage tolerance
+      .div(new BN(100));
+
+    // Liquidation cost (amount spent in step 1)
+    const liquidationCost = opportunity.debtToRepay.amount;
+
+    // Build transaction
+    const tx = new Transaction();
+
+    // Add compute budget
+    tx.add(
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 600000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 })
+    );
+
+    // Build complete_liquidation instruction using Anchor
+    const completeLiquidationIx = await this.program.methods
+      .completeLiquidation(minOutputAmount, liquidationCost)
+      .accounts({
+        operatorAuthority: this.wallet.publicKey,
+        pool: poolPda,
+        operator: operatorPda,
+        vault: vaultPda,
+        protocolFeeVault: protocolFeeVaultPda,
+        operatorTokenAccount,
+        collateralSource,
+        swapDestination,
+        jupiterProgram: JUPITER_PROGRAM_ID,
+        depositMint: this.config.depositMint,
+        collateralMint: opportunity.collateralToSeize.mint,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      // TODO: Add remaining_accounts for Jupiter swap route
+      // .remainingAccounts([...jupiterAccounts])
+      .instruction();
+
+    tx.add(completeLiquidationIx);
 
     // Add Jito tip if enabled
     if (this.config.useJito) {
-      transaction.add(this.buildJitoTipInstruction());
+      tx.add(this.buildJitoTipInstruction());
     }
 
-    // Set recent blockhash and fee payer
-    const { blockhash } = await this.connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = this.wallet.publicKey;
-
-    return transaction;
+    // Send transaction
+    const signature = await this.sendTransaction(tx);
+    return signature;
   }
 
   /**
-   * Build the execute_liquidation instruction
-   *
-   * ⚠️  IMPORTANT: This uses a hardcoded instruction discriminator.
-   *
-   * In production, you should:
-   * 1. Import the generated IDL from target/types/vultr.ts
-   * 2. Use Anchor's Program class to build instructions:
-   *    ```typescript
-   *    import { Program } from "@coral-xyz/anchor";
-   *    import { Vultr } from "../target/types/vultr";
-   *
-   *    const program = new Program<Vultr>(idl, provider);
-   *    const ix = await program.methods
-   *      .executeLiquidation(profit)
-   *      .accounts({...})
-   *      .instruction();
-   *    ```
-   *
-   * The discriminator below is calculated as:
-   * sha256("global:execute_liquidation")[0..8]
+   * Simulate a liquidation (dry run mode)
    */
-  private async buildExecuteLiquidationInstruction(
+  private async simulateLiquidation(
     opportunity: LiquidationOpportunity,
-    accounts: {
-      pool: PublicKey;
-      vault: PublicKey;
-      operator: PublicKey;
-      protocolFeeVault: PublicKey;
-      operatorTokenAccount: PublicKey;
+    startTime: number
+  ): Promise<LiquidationResult> {
+    this.logger.info("[DRY RUN] Simulating 2-step liquidation...");
+    this.logger.info("[DRY RUN] Step 1/2: Marginfi liquidation...");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    this.logger.info("[DRY RUN] Step 2/2: Jupiter swap...");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Randomly succeed or fail for realistic simulation
+    const success = Math.random() > 0.1; // 90% success rate
+
+    const executionTimeMs = Date.now() - startTime;
+
+    if (success) {
+      this.logger.success("[DRY RUN] 2-step liquidation simulation successful");
+      return {
+        success: true,
+        signature: `sim_${Date.now().toString(36)}`,
+        actualProfit: opportunity.netProfit,
+        gasCost: opportunity.estimatedGasCost,
+        executionTimeMs,
+        opportunity,
+      };
+    } else {
+      this.logger.warn("[DRY RUN] Liquidation simulation failed");
+      return {
+        success: false,
+        error: "Simulated failure",
+        executionTimeMs,
+        opportunity,
+      };
     }
-  ): Promise<TransactionInstruction> {
-    // Instruction discriminator for execute_liquidation
-    // ⚠️  HARDCODED - In production, use Anchor's instruction builder
-    // This discriminator may change if the instruction name changes!
-    // Regenerate with: sha256("global:execute_liquidation")[0..8]
-    const EXECUTE_LIQUIDATION_DISCRIMINATOR = Buffer.from([
-      0x9d, 0x13, 0x07, 0x8f, 0x5b, 0x2a, 0x1c, 0x4e,
-    ]);
-
-    // Encode profit amount as little-endian u64
-    const profitBuffer = Buffer.alloc(8);
-    profitBuffer.writeBigUInt64LE(BigInt(opportunity.estimatedProfit.toString()));
-
-    const data = Buffer.concat([EXECUTE_LIQUIDATION_DISCRIMINATOR, profitBuffer]);
-
-    // Build instruction
-    const instruction = new TransactionInstruction({
-      programId: this.config.vultrProgramId,
-      keys: [
-        { pubkey: this.wallet.publicKey, isSigner: true, isWritable: true },
-        { pubkey: accounts.pool, isSigner: false, isWritable: true },
-        { pubkey: accounts.operator, isSigner: false, isWritable: true },
-        { pubkey: this.config.depositMint, isSigner: false, isWritable: false },
-        { pubkey: accounts.vault, isSigner: false, isWritable: true },
-        { pubkey: accounts.protocolFeeVault, isSigner: false, isWritable: true },
-        { pubkey: accounts.operatorTokenAccount, isSigner: false, isWritable: true },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      ],
-      data,
-    });
-
-    return instruction;
   }
+
+  // ===========================================================================
+  // Transaction Sending
+  // ===========================================================================
 
   /**
    * Build Jito tip instruction
    */
   private buildJitoTipInstruction(): TransactionInstruction {
-    // Pick a random tip account
     const tipAccount =
       JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
 
@@ -360,14 +435,15 @@ export class LiquidationExecutor {
     });
   }
 
-  // ===========================================================================
-  // Transaction Sending
-  // ===========================================================================
-
   /**
    * Send transaction normally
    */
   private async sendTransaction(transaction: Transaction): Promise<string> {
+    // Set recent blockhash and fee payer
+    const { blockhash } = await this.connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = this.wallet.publicKey;
+
     const signature = await sendAndConfirmTransaction(
       this.connection,
       transaction,
@@ -393,19 +469,7 @@ export class LiquidationExecutor {
     // Sign the transaction
     transaction.sign(this.wallet);
 
-    // Serialize the transaction
-    const serializedTx = transaction.serialize();
-
-    // In production, use jito-ts to submit the bundle:
-    // const bundle = new Bundle([transaction]);
-    // const response = await jitoClient.sendBundle(bundle);
-
-    // For now, fall back to normal sending
-    // In a real implementation, you would:
-    // 1. Create a Jito bundle with the transaction
-    // 2. Submit to Jito block engine
-    // 3. Wait for bundle confirmation
-
+    // In production, use jito-ts to submit the bundle
     this.logger.warn(
       "Jito bundle submission not fully implemented, falling back to normal send"
     );
