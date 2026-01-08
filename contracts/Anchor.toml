@@ -7,17 +7,17 @@ skip-lint = false
 
 [programs.localnet]
 vultr = "7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe"
-vltr_staking = "Htun3aQ4rdu3PEoL8AwNM6VTsRmzeBR8TXNC3fVdR4tK"
+vltr_staking = "FdS5NH1z7uPsEFEjo7onEc1U8q2S6iwVEfdbrg5kS9yH"
 
 [programs.devnet]
 vultr = "7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe"
-vltr_staking = "Htun3aQ4rdu3PEoL8AwNM6VTsRmzeBR8TXNC3fVdR4tK"
+vltr_staking = "FdS5NH1z7uPsEFEjo7onEc1U8q2S6iwVEfdbrg5kS9yH"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Devnet"
+cluster = "Localnet"
 wallet = "/mnt/c/VULTR/vultr/bot/test-wallet.json"
 
 [scripts]
