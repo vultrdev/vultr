@@ -8,7 +8,7 @@ pub mod state;
 use instructions::*;
 
 // Program ID - will be updated after first deploy
-declare_id!("FdS5NH1z7uPsEFEjo7onEc1U8q2S6iwVEfdbrg5kS9yH");
+declare_id!("HGGgYd1djHrDSX1KyUiKtY9pbT9ocoGwDER6KyBBGzo4");
 
 #[program]
 pub mod vltr_staking {
