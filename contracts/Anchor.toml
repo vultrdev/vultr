@@ -17,7 +17,7 @@ vltr_staking = "HGGgYd1djHrDSX1KyUiKtY9pbT9ocoGwDER6KyBBGzo4"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Localnet"
+cluster = "devnet"
 wallet = "/mnt/c/VULTR/vultr/bot/test-wallet.json"
 
 [scripts]
@@ -25,3 +25,4 @@ wallet = "/mnt/c/VULTR/vultr/bot/test-wallet.json"
 # Windows CMD, causing tool resolution failures. Running ts-mocha via `node`
 # directly is more robust across environments.
 test = "node ./node_modules/ts-mocha/bin/ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
+init-staking = "node ./node_modules/ts-mocha/bin/ts-mocha -p ./tsconfig.json -t 1000000 \"scripts/initialize-staking-pool.ts\""

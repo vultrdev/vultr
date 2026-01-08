@@ -1,8 +1,8 @@
 # VULTR Project Status
 
 **Last Updated:** 2026-01-08
-**Overall Completion:** ~90%
-**Status:** Core complete, staking contract needed
+**Overall Completion:** ~95%
+**Status:** Core complete, testing staking integration
 
 ---
 
@@ -13,30 +13,50 @@
 - Team-run bot monitors Marginfi and executes liquidations
 - Profits distributed: **80% depositors** | **15% VLTR stakers** | **5% treasury**
 
-**Program ID (Devnet):** `7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe`
+**Program IDs (Devnet):**
+- VULTR Pool: `7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe`
+- VLTR Staking: `HGGgYd1djHrDSX1KyUiKtY9pbT9ocoGwDER6KyBBGzo4`
 
 ---
 
-## Current Architecture (Simplified Design)
+## Architecture
 
-The protocol was redesigned to remove external operators:
+```
+                    VULTR PROTOCOL FLOW
 
-**Old Design (Removed):**
-- External operators register and stake
-- 2-step liquidation: execute_liquidation + complete_liquidation
-- Complex operator management
-
-**New Design (Current):**
-- Team runs the bot internally
-- `bot_wallet` field authorizes the bot
-- `record_profit` instruction distributes liquidation profits
-- Direct execution: Marginfi -> Jupiter -> record_profit
+┌─────────────────────────────────────────────────────────┐
+│                    USERS                                 │
+├──────────────┬────────────────────┬─────────────────────┤
+│   Depositors │                    │    VLTR Stakers     │
+│   (USDC)     │                    │    (VLTR Token)     │
+└──────┬───────┘                    └──────────┬──────────┘
+       │                                       │
+       │ deposit()                      stake()│
+       ▼                                       ▼
+┌──────────────────┐              ┌────────────────────────┐
+│   VULTR POOL     │              │   VLTR STAKING         │
+│   7EhoUeY...     │              │   HGGgYd1...           │
+├──────────────────┤              ├────────────────────────┤
+│ • vault (USDC)   │              │ • stake_vault (VLTR)   │
+│ • share_mint     │   15% of     │ • reward_vault (USDC)  │
+│ • staking_       │   profits    │ • reward_per_token     │
+│   rewards_vault ─┼─────────────►│                        │
+│ • treasury       │              │                        │
+└────────┬─────────┘              └────────────────────────┘
+         │                                     │
+         │ record_profit()              claim()│
+         │                                     │
+┌────────┴─────────┐              ┌────────────┴───────────┐
+│   LIQUIDATION    │              │   STAKING REWARDS      │
+│   BOT            │              │   (USDC to stakers)    │
+└──────────────────┘              └────────────────────────┘
+```
 
 ---
 
 ## Component Status
 
-### Smart Contract
+### VULTR Pool Contract
 | Instruction | Status | Description |
 |-------------|--------|-------------|
 | `initialize_pool` | ✅ Done | Create pool with deposit_mint, bot_wallet |
@@ -49,6 +69,18 @@ The protocol was redesigned to remove external operators:
 | `update_pool_cap` | ✅ Done | Admin adjust TVL cap |
 | `update_bot_wallet` | ✅ Done | Admin rotate bot key |
 | `transfer_admin` | ✅ Done | Transfer admin rights |
+
+### VLTR Staking Contract
+| Instruction | Status | Description |
+|-------------|--------|-------------|
+| `initialize` | ✅ Done | Create staking pool with VLTR mint |
+| `stake` | ✅ Done | Stake VLTR tokens to earn rewards |
+| `unstake` | ✅ Done | Unstake VLTR (no cooldown) |
+| `claim` | ✅ Done | Claim accumulated USDC rewards |
+| `distribute` | ✅ Done | Admin distributes rewards to stakers |
+| `pause_pool` | ✅ Done | Emergency pause |
+| `transfer_admin` | ✅ Done | Transfer admin rights |
+| `update_reward_vault` | ✅ Done | Update reward vault address |
 
 ### Liquidation Bot
 | Component | Status | Description |
@@ -63,16 +95,18 @@ The protocol was redesigned to remove external operators:
 ### Infrastructure
 | Component | Status | Description |
 |-----------|--------|-------------|
-| Frontend | ✅ Done | Hosted on Vercel (separate repo) |
+| Frontend | ✅ Done | Vercel: `frontend-vultr7.vercel.app` |
+| Staking UI | ✅ Done | Charts, forms, pool share visualization |
 | Supabase | ✅ Done | Live for dapp data feeds |
-| Devnet Deployment | ✅ Done | Contract deployed and tested |
+| Devnet Deployment | ✅ Done | Both contracts deployed |
 
 ### Remaining
 | Component | Status | Description |
 |-----------|--------|-------------|
-| **Staking Contract** | ❌ Not started | VLTR token staking for 15% rewards |
-| VLTR Token | Pending | Will launch on PumpFun |
-| Mainnet | Pending | After staking contract |
+| VLTR Token | 🔄 Pending | Will launch on PumpFun |
+| Staking Pool Init | 🔄 Pending | Need to initialize with VLTR mint |
+| Bot Auto-Distribute | 🔄 Pending | Add distribute() call after record_profit |
+| Mainnet | 🔄 Pending | After integration testing |
 
 ---
 
@@ -85,7 +119,7 @@ Liquidation Profit (100%)
     │           Share price increases automatically
     │
     ├── 15% ──► Staking Rewards Vault (VLTR stakers)
-    │           Requires staking contract to claim
+    │           Distributed via staking contract
     │
     └── 5% ───► Treasury (protocol revenue)
 ```
@@ -94,16 +128,16 @@ Liquidation Profit (100%)
 
 ## State Structures
 
-### Pool Account
+### Pool Account (VULTR)
 ```rust
 pub struct Pool {
     pub admin: Pubkey,
-    pub bot_wallet: Pubkey,           // Authorized bot
+    pub bot_wallet: Pubkey,
     pub deposit_mint: Pubkey,          // USDC
     pub share_mint: Pubkey,            // sVLTR
-    pub vault: Pubkey,                 // Holds deposits
-    pub treasury: Pubkey,              // 5% fees
-    pub staking_rewards_vault: Pubkey, // 15% for stakers
+    pub vault: Pubkey,
+    pub treasury: Pubkey,
+    pub staking_rewards_vault: Pubkey,
     pub total_deposits: u64,
     pub total_shares: u64,
     pub total_profit: u64,
@@ -117,17 +151,34 @@ pub struct Pool {
 }
 ```
 
-### Depositor Account
+### Staking Pool Account (VLTR Staking)
 ```rust
-pub struct Depositor {
+pub struct StakingPool {
+    pub admin: Pubkey,
+    pub vltr_mint: Pubkey,
+    pub reward_mint: Pubkey,           // USDC
+    pub stake_vault: Pubkey,
+    pub reward_vault: Pubkey,
+    pub total_staked: u64,
+    pub total_rewards_distributed: u64,
+    pub reward_per_token: u128,        // Scaled by 1e18
+    pub last_distribution_time: i64,
+    pub staker_count: u32,
+    pub is_paused: bool,
+    pub bump: u8,
+}
+```
+
+### Staker Account
+```rust
+pub struct Staker {
     pub pool: Pubkey,
     pub owner: Pubkey,
-    pub shares_minted: u64,
-    pub total_deposited: u64,
-    pub total_withdrawn: u64,
-    pub deposit_count: u32,
-    pub last_deposit_timestamp: i64,
-    pub last_withdrawal_timestamp: i64,
+    pub staked_amount: u64,
+    pub reward_debt: u128,
+    pub rewards_claimed: u64,
+    pub first_stake_time: i64,
+    pub last_stake_time: i64,
     pub bump: u8,
 }
 ```
@@ -136,48 +187,53 @@ pub struct Depositor {
 
 ## Next Steps
 
-1. **Build Staking Contract**
-   - Simple pro-rata rewards model
-   - No unstaking cooldown
-   - VLTR token from PumpFun
-
-2. **Mainnet Testing**
-   - Deploy both contracts
-   - Test with real liquidations
-
-3. **Launch**
-   - VLTR token on PumpFun
-   - Enable staking in frontend
+1. **Create Mock VLTR Token** (devnet testing)
+2. **Initialize Staking Pool** with mock token
+3. **Update Bot** to auto-distribute rewards
+4. **Integration Test** full flow
+5. **Launch VLTR on PumpFun**
+6. **Mainnet Deployment**
 
 ---
 
 ## Key Files
 
 ```
-contracts/programs/vultr/src/
-├── lib.rs              # Program entry
-├── constants.rs        # Fee configs, seeds
-├── error.rs            # Error codes
-├── state/
-│   ├── pool.rs         # Pool account
-│   └── depositor.rs    # User positions
-└── instructions/
-    ├── initialize_pool.rs
-    ├── deposit.rs
-    ├── withdraw.rs
-    ├── record_profit.rs
-    ├── admin.rs
-    └── update_pool_cap.rs
+contracts/programs/
+├── vultr/src/                    # Main pool contract
+│   ├── lib.rs
+│   ├── instructions/
+│   │   ├── deposit.rs
+│   │   ├── withdraw.rs
+│   │   ├── record_profit.rs
+│   │   └── admin.rs
+│   └── state/
+│       ├── pool.rs
+│       └── depositor.rs
+└── vltr-staking/src/             # Staking contract
+    ├── lib.rs
+    ├── instructions/
+    │   ├── stake.rs
+    │   ├── unstake.rs
+    │   ├── claim.rs
+    │   └── distribute.rs
+    └── state/
+        ├── staking_pool.rs
+        └── staker.rs
 
 bot/src/
-├── index.ts            # Main bot loop
-├── executor.ts         # Liquidation execution
-├── marginfi.ts         # Position monitoring
-├── oracle.ts           # Price feeds
-├── calculator.ts       # Profit analysis
+├── index.ts                      # Main bot loop
+├── executor.ts                   # Liquidation execution
+├── marginfi.ts                   # Position monitoring
 └── vultr/
-    ├── client.ts       # Pool state fetching
-    └── recordProfit.ts # Profit distribution
+    ├── client.ts                 # Pool state fetching
+    └── recordProfit.ts           # Profit distribution
+
+frontend/src/
+├── config/staking.ts             # Staking config (needs VLTR_MINT)
+├── hooks/useStaking.ts           # Staking hooks
+├── pages/Staking.tsx             # Staking page
+└── components/staking/           # Staking components
 ```
 
 ---

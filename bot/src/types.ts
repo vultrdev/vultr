@@ -51,6 +51,12 @@ export interface BotConfig {
   txConfirmMaxRetries: number;
   /** Timeout for transaction confirmations in milliseconds */
   txConfirmTimeoutMs: number;
+  /** Staking program ID (for auto-distribute) */
+  stakingProgramId?: PublicKey;
+  /** VLTR token mint (for staking) */
+  vltrMint?: PublicKey;
+  /** Whether to auto-distribute staking rewards after record_profit */
+  autoDistributeStakingRewards: boolean;
 }
 
 // =============================================================================
@@ -345,4 +351,36 @@ export interface StuckCollateral {
   retryCount: number;
   /** Error message from last failure */
   lastError: string;
+}
+
+// =============================================================================
+// Staking Types
+// =============================================================================
+
+/**
+ * Staking pool state from on-chain VLTR Staking account
+ */
+export interface StakingPoolState {
+  /** Pool admin */
+  admin: PublicKey;
+  /** VLTR token mint */
+  vltrMint: PublicKey;
+  /** Reward token mint (USDC) */
+  rewardMint: PublicKey;
+  /** Vault holding staked VLTR */
+  stakeVault: PublicKey;
+  /** Vault for reward distribution */
+  rewardVault: PublicKey;
+  /** Total VLTR staked */
+  totalStaked: BN;
+  /** Total rewards distributed */
+  totalRewardsDistributed: BN;
+  /** Reward per token (scaled) */
+  rewardPerToken: BN;
+  /** Last distribution timestamp */
+  lastDistributionTime: number;
+  /** Number of stakers */
+  stakerCount: number;
+  /** Whether pool is paused */
+  isPaused: boolean;
 }

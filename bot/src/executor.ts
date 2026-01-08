@@ -35,7 +35,7 @@ import {
   StuckCollateral,
 } from "./types";
 import { Logger } from "./logger";
-import { VultrClient, RecordProfitBuilder } from "./vultr";
+import { VultrClient, RecordProfitBuilder, StakingClient } from "./vultr";
 import {
   executeWithRetry,
   RateLimiter,
@@ -92,6 +92,7 @@ export class LiquidationExecutor {
   private state: BotState;
   private vultrClient: VultrClient;
   private recordProfitBuilder: RecordProfitBuilder;
+  private stakingClient: StakingClient | null;
   private rateLimiter: RateLimiter;
 
   // Track stuck collateral for manual recovery
@@ -119,6 +120,19 @@ export class LiquidationExecutor {
     // Initialize VULTR clients
     this.vultrClient = new VultrClient(connection, wallet, this.logger);
     this.recordProfitBuilder = new RecordProfitBuilder(connection, wallet, this.logger);
+
+    // Initialize Staking client if configured
+    if (config.stakingProgramId && config.vltrMint && config.autoDistributeStakingRewards) {
+      this.stakingClient = new StakingClient(
+        connection,
+        wallet,
+        config.stakingProgramId,
+        this.logger
+      );
+      this.logger.info("Staking client initialized for auto-distribution");
+    } else {
+      this.stakingClient = null;
+    }
   }
 
   // ===========================================================================
@@ -225,6 +239,28 @@ export class LiquidationExecutor {
               `${recordResult.distribution.stakingShare.toNumber() / 1_000_000} stakers, ` +
               `${recordResult.distribution.treasuryShare.toNumber() / 1_000_000} treasury`
             );
+
+            // Auto-distribute staking rewards if enabled
+            if (
+              this.stakingClient &&
+              this.config.vltrMint &&
+              recordResult.distribution.stakingShare.gt(new BN(0))
+            ) {
+              this.logger.info("Auto-distributing staking rewards...");
+              const distributeResult = await this.stakingClient.distribute(
+                this.config.vltrMint,
+                recordResult.distribution.stakingShare,
+                pool.stakingRewardsVault
+              );
+
+              if (distributeResult.success) {
+                this.logger.success(
+                  `Staking rewards distributed: ${recordResult.distribution.stakingShare.toNumber() / 1_000_000} USDC`
+                );
+              } else {
+                this.logger.warn(`Staking distribution failed: ${distributeResult.error}`);
+              }
+            }
           }
         }
       } else {

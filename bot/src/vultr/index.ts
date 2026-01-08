@@ -8,3 +8,4 @@ export {
   RecordProfitParams,
   RecordProfitResult,
 } from "./recordProfit";
+export { StakingClient } from "./staking";

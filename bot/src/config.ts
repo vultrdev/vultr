@@ -42,6 +42,10 @@ const DEFAULTS = {
   RPC_BACKOFF_MS: 500, // Initial 500ms backoff
   TX_CONFIRM_MAX_RETRIES: 30, // Max 30 retries for tx confirmation
   TX_CONFIRM_TIMEOUT_MS: 60000, // 60s timeout for confirmations
+  // Staking configuration
+  STAKING_PROGRAM_ID: "HGGgYd1djHrDSX1KyUiKtY9pbT9ocoGwDER6KyBBGzo4",
+  VLTR_MINT: "", // Set after PumpFun launch
+  AUTO_DISTRIBUTE_STAKING_REWARDS: true,
 };
 
 // =============================================================================
@@ -132,6 +136,15 @@ export function loadConfig(): BotConfig {
       process.env.TX_CONFIRM_TIMEOUT_MS || String(DEFAULTS.TX_CONFIRM_TIMEOUT_MS),
       10
     ),
+    // Staking configuration
+    stakingProgramId: process.env.STAKING_PROGRAM_ID
+      ? new PublicKey(process.env.STAKING_PROGRAM_ID)
+      : new PublicKey(DEFAULTS.STAKING_PROGRAM_ID),
+    vltrMint: process.env.VLTR_MINT
+      ? new PublicKey(process.env.VLTR_MINT)
+      : undefined,
+    autoDistributeStakingRewards:
+      process.env.AUTO_DISTRIBUTE_STAKING_REWARDS !== "false",
   };
 
   // Validate configuration
@@ -248,6 +261,19 @@ DRY_RUN=true
 
 # Log level (debug, info, warn, error)
 LOG_LEVEL=info
+
+# =============================================================================
+# VLTR Staking Configuration (Optional)
+# =============================================================================
+
+# VLTR Staking program ID (for auto-distributing staking rewards)
+STAKING_PROGRAM_ID=HGGgYd1djHrDSX1KyUiKtY9pbT9ocoGwDER6KyBBGzo4
+
+# VLTR token mint (set after PumpFun launch)
+# VLTR_MINT=
+
+# Auto-distribute staking rewards after record_profit (true/false)
+AUTO_DISTRIBUTE_STAKING_REWARDS=true
 `;
 
   fs.writeFileSync(outputPath, content);
@@ -272,5 +298,8 @@ export function printConfig(config: BotConfig): void {
   console.log(`Jito Tip: ${config.jitoTipLamports} lamports`);
   console.log(`Dry Run: ${config.dryRun}`);
   console.log(`Log Level: ${config.logLevel}`);
+  console.log(`Staking Program ID: ${config.stakingProgramId?.toBase58() || "Not set"}`);
+  console.log(`VLTR Mint: ${config.vltrMint?.toBase58() || "Not set"}`);
+  console.log(`Auto-Distribute Staking Rewards: ${config.autoDistributeStakingRewards}`);
   console.log("=========================\n");
 }
