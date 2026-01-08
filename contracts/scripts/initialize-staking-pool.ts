@@ -29,7 +29,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 // Standard Devnet USDC
-const DEVNET_USDC_MINT = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+const DEVNET_USDC_MINT = new PublicKey("A1Y8wecoidpqZBS7hhohtACkBoQyLudnJGCVGkvKJ4FX");
 
 // VLTR token decimals (same as USDC for simplicity)
 const VLTR_DECIMALS = 6;

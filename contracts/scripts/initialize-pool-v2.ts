@@ -19,8 +19,8 @@ import {
   getAssociatedTokenAddress,
 } from "@solana/spl-token";
 
-// Standard Devnet USDC
-const DEVNET_USDC_MINT = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+// Test USDC for devnet (we have mint authority)
+const DEVNET_USDC_MINT = new PublicKey("A1Y8wecoidpqZBS7hhohtACkBoQyLudnJGCVGkvKJ4FX");
 
 async function main() {
   console.log("\n🚀 VULTR Pool Initialization v2 - NEW DESIGN\n");
