@@ -7,9 +7,11 @@ skip-lint = false
 
 [programs.localnet]
 vultr = "7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe"
+vltr_staking = "Htun3aQ4rdu3PEoL8AwNM6VTsRmzeBR8TXNC3fVdR4tK"
 
 [programs.devnet]
 vultr = "7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe"
+vltr_staking = "Htun3aQ4rdu3PEoL8AwNM6VTsRmzeBR8TXNC3fVdR4tK"
 
 [registry]
 url = "https://api.apr.dev"
