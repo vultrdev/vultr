@@ -22,7 +22,10 @@ dotenv.config();
 const DEFAULTS = {
   RPC_URL: "https://api.mainnet-beta.solana.com",
   WS_URL: "wss://api.mainnet-beta.solana.com",
-  VULTR_PROGRAM_ID: "2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm",
+  // NEW program ID (simplified design with record_profit)
+  VULTR_PROGRAM_ID: "7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe",
+  // Pool address must be set in .env (derived from ["pool", deposit_mint])
+  POOL_ADDRESS: "",
   // USDC on mainnet
   DEPOSIT_MINT: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   MIN_PROFIT_BPS: 50, // 0.5% minimum profit
@@ -57,7 +60,17 @@ export function loadConfig(): BotConfig {
   if (!walletPath) {
     throw new Error(
       "WALLET_PATH environment variable is required. " +
-        "Set it to the path of your operator wallet keypair JSON file."
+        "Set it to the path of your bot wallet keypair JSON file."
+    );
+  }
+
+  // Required: pool address
+  const poolAddress = process.env.POOL_ADDRESS;
+  if (!poolAddress) {
+    throw new Error(
+      "POOL_ADDRESS environment variable is required. " +
+        "Set it to the deployed Pool PDA address. " +
+        "The bot wallet must match pool.bot_wallet on-chain."
     );
   }
 
@@ -75,6 +88,7 @@ export function loadConfig(): BotConfig {
     vultrProgramId: new PublicKey(
       process.env.VULTR_PROGRAM_ID || DEFAULTS.VULTR_PROGRAM_ID
     ),
+    poolAddress: new PublicKey(poolAddress),
     depositMint: new PublicKey(
       process.env.DEPOSIT_MINT || DEFAULTS.DEPOSIT_MINT
     ),
@@ -249,6 +263,7 @@ export function printConfig(config: BotConfig): void {
   console.log(`WebSocket URL: ${config.wsUrl}`);
   console.log(`Wallet Path: ${config.walletPath}`);
   console.log(`VULTR Program ID: ${config.vultrProgramId.toBase58()}`);
+  console.log(`Pool Address: ${config.poolAddress.toBase58()}`);
   console.log(`Deposit Mint: ${config.depositMint.toBase58()}`);
   console.log(`Min Profit: ${config.minProfitBps / 100}%`);
   console.log(`Max Position Size: ${config.maxPositionSize.toString()}`);

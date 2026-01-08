@@ -5,9 +5,9 @@
 // "Circle. Wait. Feast." 🦅
 //
 // VULTR is a decentralized liquidation pool on Solana where:
-// - Users deposit USDC and receive VLTR shares
-// - Operators execute liquidations on lending protocols
-// - Profits are distributed: 80% depositors, 15% operators, 5% protocol
+// - Users deposit USDC and receive sVLTR shares
+// - Team's bot executes liquidations on lending protocols
+// - Profits are distributed: 80% depositors, 15% VLTR stakers, 5% treasury
 //
 // This is the main entry point for the VULTR Anchor program.
 // =============================================================================
@@ -28,9 +28,8 @@ pub use instructions::*;
 pub use state::*;
 
 // Declare the program ID - this is the address of the deployed program
-// When you run `anchor build`, a new keypair is generated if one doesn't exist
-// You can find/update this in Anchor.toml
-declare_id!("2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm");
+// Deployed to devnet: 7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe
+declare_id!("7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe");
 
 /// The VULTR program module
 ///
@@ -49,8 +48,12 @@ pub mod vultr {
     /// Creates:
     /// - Pool account (stores configuration)
     /// - Vault token account (holds deposits)
-    /// - Share mint (VLTR tokens)
-    /// - Protocol fee vault
+    /// - Share mint (sVLTR tokens)
+    ///
+    /// Requires external accounts:
+    /// - Treasury token account (for 5% protocol fees)
+    /// - Staking rewards vault (for 15% VLTR staker rewards)
+    /// - Bot wallet address (authorized to call record_profit)
     ///
     /// Can only be called once per deposit token (e.g., USDC)
     pub fn initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
@@ -84,89 +87,23 @@ pub mod vultr {
     }
 
     // =========================================================================
-    // Operator Operations
+    // Bot Operations (Team's bot only)
     // =========================================================================
 
-    /// Register as a liquidation operator by staking tokens
+    /// Record profit from a liquidation and distribute fees
+    ///
+    /// This can ONLY be called by the authorized bot_wallet stored in the pool.
+    /// The bot performs liquidations off-chain and then calls this to record profit.
     ///
     /// # Arguments
-    /// * `stake_amount` - Amount to stake (must be >= MIN_OPERATOR_STAKE)
+    /// * `profit_amount` - Total profit from liquidation (in deposit token base units)
     ///
-    /// # Requirements
-    /// * Must stake at least 10,000 USDC equivalent
-    pub fn register_operator(ctx: Context<RegisterOperator>, stake_amount: u64) -> Result<()> {
-        instructions::register_operator::handler_register_operator(ctx, stake_amount)
-    }
-
-    /// Deregister as an operator and recover stake
-    ///
-    /// # Returns
-    /// * Full stake amount returned to operator
-    /// * Operator account is closed
-    pub fn deregister_operator(ctx: Context<DeregisterOperator>) -> Result<()> {
-        instructions::deregister_operator::handler_deregister_operator(ctx)
-    }
-
-    /// Request operator stake withdrawal (starts cooldown)
-    ///
-    /// This is step 1 of a 2-step flow:
-    /// 1) request_operator_withdrawal
-    /// 2) deregister_operator (after cooldown)
-    pub fn request_operator_withdrawal(ctx: Context<RequestOperatorWithdrawal>) -> Result<()> {
-        instructions::request_operator_withdrawal::handler_request_operator_withdrawal(ctx)
-    }
-
-    /// Execute a Marginfi liquidation (Step 1 of 2-step liquidation process)
-    ///
-    /// # Arguments
-    /// * `asset_amount` - Amount of liability to repay (in deposit token base units)
-    ///
-    /// # Flow
-    /// 1. Validates target margin account is liquidatable
-    /// 2. Calls Marginfi liquidate instruction via CPI
-    /// 3. Receives collateral in pool-controlled token account
-    /// 4. Collateral is swapped in separate complete_liquidation instruction
-    ///
-    /// # Notes
-    /// - This is Step 1 of a 2-step process (Marginfi CPI + Jupiter swap)
-    /// - Split due to compute budget constraints
-    /// - Profit distribution happens after swap in complete_liquidation
-    pub fn execute_liquidation(ctx: Context<ExecuteLiquidation>, asset_amount: u64) -> Result<()> {
-        instructions::execute_liquidation::handler_execute_liquidation(ctx, asset_amount)
-    }
-
-    /// Complete a liquidation by swapping collateral (Step 2 of 2-step process)
-    ///
-    /// # Arguments
-    /// * `min_output_amount` - Minimum USDC to receive (slippage protection)
-    /// * `liquidation_cost` - Amount of USDC spent in Marginfi liquidation
-    /// * `jupiter_instruction_data` - Serialized Jupiter swap instruction (built off-chain by bot)
-    ///
-    /// # Flow
-    /// 1. Reads collateral from execute_liquidation
-    /// 2. Swaps collateral to USDC via Jupiter CPI
-    /// 3. Calculates profit: (USDC received - liquidation_cost)
-    /// 4. Distributes fees: 80% depositors, 15% operator, 5% protocol
-    /// 5. Updates pool and operator state
-    ///
-    /// # Notes
-    /// - Must be called after execute_liquidation
-    /// - Jupiter instruction data is built off-chain using Jupiter SDK
-    /// - All Jupiter route accounts must be passed via remaining_accounts
-    /// - Uses pool's max_slippage_bps for swap protection
-    /// - Requires collateral_source account to have balance
-    pub fn complete_liquidation(
-        ctx: Context<CompleteLiquidation>,
-        min_output_amount: u64,
-        liquidation_cost: u64,
-        jupiter_instruction_data: Vec<u8>,
-    ) -> Result<()> {
-        instructions::complete_liquidation::handler_complete_liquidation(
-            ctx,
-            min_output_amount,
-            liquidation_cost,
-            jupiter_instruction_data,
-        )
+    /// # Fee Distribution
+    /// * 80% to vault (increases share price for depositors)
+    /// * 15% to staking_rewards_vault (for VLTR token stakers)
+    /// * 5% to treasury (protocol revenue)
+    pub fn record_profit(ctx: Context<RecordProfit>, profit_amount: u64) -> Result<()> {
+        instructions::record_profit::handler_record_profit(ctx, profit_amount)
     }
 
     // =========================================================================
@@ -181,7 +118,7 @@ pub mod vultr {
     /// When paused:
     /// * No deposits allowed
     /// * No withdrawals allowed
-    /// * No liquidations allowed
+    /// * No profit recording allowed
     pub fn pause_pool(ctx: Context<PausePool>, paused: bool) -> Result<()> {
         instructions::admin::handler_pause_pool(ctx, paused)
     }
@@ -189,55 +126,57 @@ pub mod vultr {
     /// Update fee configuration (admin only)
     ///
     /// # Arguments
-    /// * `protocol_fee_bps` - Protocol fee in basis points (max 2000 = 20%)
-    /// * `operator_fee_bps` - Operator fee in basis points (max 3000 = 30%)
-    /// * `depositor_share_bps` - Depositor share in basis points
+    /// * `depositor_fee_bps` - Depositor share in basis points (default 8000 = 80%)
+    /// * `staking_fee_bps` - VLTR staker share in basis points (default 1500 = 15%)
+    /// * `treasury_fee_bps` - Treasury share in basis points (default 500 = 5%)
     ///
     /// # Requirements
     /// * All three must sum to exactly 10000 (100%)
+    /// * Depositor share must be at least 50%
+    /// * Staking share must be at most 30%
+    /// * Treasury share must be at most 20%
     pub fn update_fees(
         ctx: Context<UpdateFees>,
-        protocol_fee_bps: u16,
-        operator_fee_bps: u16,
-        depositor_share_bps: u16,
+        depositor_fee_bps: u16,
+        staking_fee_bps: u16,
+        treasury_fee_bps: u16,
     ) -> Result<()> {
-        instructions::admin::handler_update_fees(ctx, protocol_fee_bps, operator_fee_bps, depositor_share_bps)
+        instructions::admin::handler_update_fees(ctx, depositor_fee_bps, staking_fee_bps, treasury_fee_bps)
     }
 
-    /// Update operator cooldown (admin only)
+    /// Update the authorized bot wallet address (admin only)
     ///
-    /// - 0 means immediate withdrawal is allowed once requested (good for devnet tests)
-    /// - Set to e.g. 7 days before mainnet launch
-    pub fn update_operator_cooldown(
-        ctx: Context<UpdateOperatorCooldown>,
-        cooldown_seconds: i64,
-    ) -> Result<()> {
-        instructions::admin::handler_update_operator_cooldown(ctx, cooldown_seconds)
-    }
-
-    /// Update slippage tolerance for liquidations (admin only)
-    ///
-    /// # Arguments
-    /// * `max_slippage_bps` - Maximum slippage in basis points (0-1000)
-    ///   - 100 BPS = 1%
-    ///   - 300 BPS = 3% (recommended)
-    ///   - 1000 BPS = 10% (maximum)
+    /// # Purpose
+    /// Allows admin to change the bot wallet for:
+    /// - Key rotation for security
+    /// - Upgrading to a new bot
+    /// - Switching to a different operator
     ///
     /// # Security
-    /// Slippage tolerance protects against MEV attacks and bad swap routes.
-    /// Setting it too high exposes the pool to price manipulation.
-    pub fn update_slippage_tolerance(
-        ctx: Context<UpdateSlippageTolerance>,
-        max_slippage_bps: u16,
-    ) -> Result<()> {
-        instructions::admin::handler_update_slippage_tolerance(ctx, max_slippage_bps)
+    /// Only the new bot_wallet will be able to call record_profit
+    pub fn update_bot_wallet(ctx: Context<UpdateBotWallet>) -> Result<()> {
+        instructions::admin::handler_update_bot_wallet(ctx)
     }
 
-    /// Withdraw accumulated protocol fees (admin only)
+    /// Update maximum pool size cap (admin only)
     ///
-    /// Transfers all fees from protocol fee vault to admin's token account
-    pub fn withdraw_protocol_fees(ctx: Context<WithdrawProtocolFees>) -> Result<()> {
-        instructions::admin::handler_withdraw_protocol_fees(ctx)
+    /// # Arguments
+    /// * `new_cap` - New maximum pool size in base units (e.g., USDC with 6 decimals)
+    ///
+    /// # Purpose
+    /// Allows admin to control pool growth for optimal capital efficiency:
+    /// - Start with lower cap (500K USDC) for high APY at launch
+    /// - Gradually raise cap as liquidation volume grows
+    /// - Ensure pool size matches available liquidation opportunities
+    ///
+    /// # Constraints
+    /// - Cannot exceed global MAX_POOL_SIZE (1B USDC)
+    /// - Cannot reduce below current total_deposits
+    pub fn update_pool_cap(
+        ctx: Context<UpdatePoolCap>,
+        new_cap: u64,
+    ) -> Result<()> {
+        instructions::update_pool_cap::handler_update_pool_cap(ctx, new_cap)
     }
 
     /// Transfer admin rights to a new address (admin only)

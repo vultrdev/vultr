@@ -1,10 +1,12 @@
 // =============================================================================
-// Instructions Module
+// Instructions Module - NEW SIMPLIFIED DESIGN
 // =============================================================================
 // This module exports all instructions for the VULTR protocol.
 //
-// Instructions are the "API" of the Solana program - each one represents
-// an action that can be taken by calling the program.
+// KEY CHANGES FROM OLD DESIGN:
+// - Removed: register_operator, deregister_operator, request_operator_withdrawal
+// - Removed: execute_liquidation, complete_liquidation (complex 2-step flow)
+// - Added: record_profit (simple profit recording by bot_wallet)
 // =============================================================================
 
 // Core pool operations
@@ -12,24 +14,17 @@ pub mod deposit;
 pub mod initialize_pool;
 pub mod withdraw;
 
-// Operator operations
-pub mod deregister_operator;
-pub mod execute_liquidation;
-pub mod complete_liquidation;
-pub mod register_operator;
-pub mod request_operator_withdrawal;
+// Profit recording (called by bot_wallet)
+pub mod record_profit;
 
 // Admin operations
 pub mod admin;
+pub mod update_pool_cap;
 
 // Re-export everything from each module
-// The #[derive(Accounts)] macro generates helper types that need to be at crate root
 pub use admin::*;
-pub use complete_liquidation::*;
-pub use deregister_operator::*;
 pub use deposit::*;
-pub use execute_liquidation::*;
 pub use initialize_pool::*;
-pub use register_operator::*;
-pub use request_operator_withdrawal::*;
+pub use record_profit::*;
+pub use update_pool_cap::*;
 pub use withdraw::*;

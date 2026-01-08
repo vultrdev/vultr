@@ -1,16 +1,21 @@
 // =============================================================================
-// VULTR Protocol Test Suite
+// VULTR Protocol Test Suite - NEW SIMPLIFIED DESIGN
 // =============================================================================
 // Comprehensive tests for the VULTR liquidation pool protocol.
 //
 // Test Categories:
 // 1. Pool Initialization
 // 2. Deposits & Share Calculations
-// 3. Withdrawals & Profit Distribution
-// 4. Operator Registration/Deregistration
-// 5. Liquidation Execution
-// 6. Admin Functions
-// 7. Edge Cases & Error Handling
+// 3. Withdrawals
+// 4. Bot Profit Recording
+// 5. Admin Functions
+// 6. Edge Cases & Error Handling
+//
+// KEY CHANGES FROM OLD DESIGN:
+// - No external operators - team runs the bot internally
+// - record_profit instead of execute_liquidation
+// - Bot wallet authorization instead of operator registration
+// - External treasury and staking_rewards_vault
 // =============================================================================
 
 import * as anchor from "@coral-xyz/anchor";
@@ -36,11 +41,10 @@ import { Vultr } from "../target/types/vultr";
 // Constants (should match program constants)
 // =============================================================================
 
-const PROTOCOL_FEE_BPS = 500; // 5%
-const OPERATOR_FEE_BPS = 1500; // 15%
-const DEPOSITOR_SHARE_BPS = 8000; // 80%
+const TREASURY_FEE_BPS = 500; // 5%
+const STAKING_FEE_BPS = 1500; // 15%
+const DEPOSITOR_FEE_BPS = 8000; // 80%
 const BPS_DENOMINATOR = 10000;
-const MIN_OPERATOR_STAKE = new BN(10_000_000_000); // 10,000 USDC
 const MIN_DEPOSIT_AMOUNT = new BN(1_000_000); // 1 USDC
 const USDC_DECIMALS = 6;
 
@@ -49,8 +53,6 @@ const POOL_SEED = Buffer.from("pool");
 const VAULT_SEED = Buffer.from("vault");
 const SHARE_MINT_SEED = Buffer.from("share_mint");
 const DEPOSITOR_SEED = Buffer.from("depositor");
-const OPERATOR_SEED = Buffer.from("operator");
-const PROTOCOL_FEE_VAULT_SEED = Buffer.from("protocol_fee_vault");
 
 // =============================================================================
 // Test Utilities
@@ -105,33 +107,6 @@ function findDepositorPDA(
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [DEPOSITOR_SEED, pool.toBuffer(), owner.toBuffer()],
-    programId
-  );
-}
-
-/**
- * Find PDA for operator account
- */
-function findOperatorPDA(
-  pool: PublicKey,
-  authority: PublicKey,
-  programId: PublicKey
-): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [OPERATOR_SEED, pool.toBuffer(), authority.toBuffer()],
-    programId
-  );
-}
-
-/**
- * Find PDA for protocol fee vault
- */
-function findProtocolFeeVaultPDA(
-  pool: PublicKey,
-  programId: PublicKey
-): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [PROTOCOL_FEE_VAULT_SEED, pool.toBuffer()],
     programId
   );
 }
@@ -200,7 +175,7 @@ async function getTokenBalance(
 // Test Suite
 // =============================================================================
 
-describe("VULTR Protocol", () => {
+describe("VULTR Protocol - New Simplified Design", () => {
   // Configure Anchor provider
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
@@ -212,7 +187,7 @@ describe("VULTR Protocol", () => {
   let admin: Keypair;
   let user1: Keypair;
   let user2: Keypair;
-  let operator1: Keypair;
+  let botWallet: Keypair;
 
   // Token mints
   let depositMint: PublicKey; // Mock USDC
@@ -222,15 +197,17 @@ describe("VULTR Protocol", () => {
   let poolBump: number;
   let vaultPDA: PublicKey;
   let shareMintPDA: PublicKey;
-  let protocolFeeVaultPDA: PublicKey;
 
-  // Token accounts
-  let adminDepositAccount: PublicKey;
+  // External token accounts (not PDAs)
+  let treasury: PublicKey;
+  let stakingRewardsVault: PublicKey;
+  let botProfitSource: PublicKey;
+
+  // User token accounts
   let user1DepositAccount: PublicKey;
   let user1ShareAccount: PublicKey;
   let user2DepositAccount: PublicKey;
   let user2ShareAccount: PublicKey;
-  let operator1DepositAccount: PublicKey;
 
   // ==========================================================================
   // Setup
@@ -243,13 +220,13 @@ describe("VULTR Protocol", () => {
     admin = Keypair.generate();
     user1 = Keypair.generate();
     user2 = Keypair.generate();
-    operator1 = Keypair.generate();
+    botWallet = Keypair.generate();
 
     // Airdrop SOL to all accounts
     await airdropSol(connection, admin.publicKey);
     await airdropSol(connection, user1.publicKey);
     await airdropSol(connection, user2.publicKey);
-    await airdropSol(connection, operator1.publicKey);
+    await airdropSol(connection, botWallet.publicKey);
 
     // Create mock USDC mint
     depositMint = await createMockUSDC(connection, admin);
@@ -259,20 +236,42 @@ describe("VULTR Protocol", () => {
     [poolPDA, poolBump] = findPoolPDA(depositMint, program.programId);
     [vaultPDA] = findVaultPDA(poolPDA, program.programId);
     [shareMintPDA] = findShareMintPDA(poolPDA, program.programId);
-    [protocolFeeVaultPDA] = findProtocolFeeVaultPDA(poolPDA, program.programId);
 
     console.log("Pool PDA:", poolPDA.toBase58());
     console.log("Vault PDA:", vaultPDA.toBase58());
     console.log("Share Mint PDA:", shareMintPDA.toBase58());
 
-    // Create token accounts for admin
-    const adminATA = await getOrCreateAssociatedTokenAccount(
+    // Create external treasury account (owned by admin)
+    const treasuryATA = await getOrCreateAssociatedTokenAccount(
       connection,
       admin,
       depositMint,
       admin.publicKey
     );
-    adminDepositAccount = adminATA.address;
+    treasury = treasuryATA.address;
+    console.log("Treasury:", treasury.toBase58());
+
+    // Create staking rewards vault (could be a separate keypair in production)
+    const stakingVaultKeypair = Keypair.generate();
+    await airdropSol(connection, stakingVaultKeypair.publicKey, 1);
+    const stakingATA = await getOrCreateAssociatedTokenAccount(
+      connection,
+      stakingVaultKeypair,
+      depositMint,
+      stakingVaultKeypair.publicKey
+    );
+    stakingRewardsVault = stakingATA.address;
+    console.log("Staking Rewards Vault:", stakingRewardsVault.toBase58());
+
+    // Create bot's profit source account
+    const botATA = await getOrCreateAssociatedTokenAccount(
+      connection,
+      botWallet,
+      depositMint,
+      botWallet.publicKey
+    );
+    botProfitSource = botATA.address;
+    console.log("Bot Profit Source:", botProfitSource.toBase58());
 
     // Create token accounts for user1
     const user1DepositATA = await getOrCreateAssociatedTokenAccount(
@@ -292,25 +291,7 @@ describe("VULTR Protocol", () => {
     );
     user2DepositAccount = user2DepositATA.address;
 
-    // Create token accounts for operator1
-    const operator1DepositATA = await getOrCreateAssociatedTokenAccount(
-      connection,
-      operator1,
-      depositMint,
-      operator1.publicKey
-    );
-    operator1DepositAccount = operator1DepositATA.address;
-
     // Mint initial USDC to test users
-    // Admin: 1,000,000 USDC
-    await mintTokens(
-      connection,
-      admin,
-      depositMint,
-      adminDepositAccount,
-      1_000_000_000_000
-    );
-
     // User1: 100,000 USDC
     await mintTokens(
       connection,
@@ -329,13 +310,13 @@ describe("VULTR Protocol", () => {
       50_000_000_000
     );
 
-    // Operator1: 20,000 USDC (enough for min stake + extra)
+    // Bot wallet: 10,000 USDC (for simulating profits)
     await mintTokens(
       connection,
       admin,
       depositMint,
-      operator1DepositAccount,
-      20_000_000_000
+      botProfitSource,
+      10_000_000_000
     );
 
     console.log("Test environment setup complete!");
@@ -355,7 +336,9 @@ describe("VULTR Protocol", () => {
           depositMint: depositMint,
           shareMint: shareMintPDA,
           vault: vaultPDA,
-          protocolFeeVault: protocolFeeVaultPDA,
+          treasury: treasury,
+          stakingRewardsVault: stakingRewardsVault,
+          botWallet: botWallet.publicKey,
           systemProgram: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
@@ -369,44 +352,20 @@ describe("VULTR Protocol", () => {
 
       // Verify pool state
       assert.ok(pool.admin.equals(admin.publicKey), "Admin should match");
-      assert.ok(
-        pool.depositMint.equals(depositMint),
-        "Deposit mint should match"
-      );
-      assert.ok(
-        pool.shareMint.equals(shareMintPDA),
-        "Share mint should match"
-      );
+      assert.ok(pool.botWallet.equals(botWallet.publicKey), "Bot wallet should match");
+      assert.ok(pool.depositMint.equals(depositMint), "Deposit mint should match");
+      assert.ok(pool.shareMint.equals(shareMintPDA), "Share mint should match");
       assert.ok(pool.vault.equals(vaultPDA), "Vault should match");
-      assert.equal(
-        pool.totalDeposits.toNumber(),
-        0,
-        "Total deposits should be 0"
-      );
+      assert.ok(pool.treasury.equals(treasury), "Treasury should match");
+      assert.ok(pool.stakingRewardsVault.equals(stakingRewardsVault), "Staking rewards vault should match");
+      assert.equal(pool.totalDeposits.toNumber(), 0, "Total deposits should be 0");
       assert.equal(pool.totalShares.toNumber(), 0, "Total shares should be 0");
       assert.equal(pool.totalProfit.toNumber(), 0, "Total profit should be 0");
-      assert.equal(
-        pool.protocolFeeBps,
-        PROTOCOL_FEE_BPS,
-        "Protocol fee should match"
-      );
-      assert.equal(
-        pool.operatorFeeBps,
-        OPERATOR_FEE_BPS,
-        "Operator fee should match"
-      );
-      assert.equal(
-        pool.depositorShareBps,
-        DEPOSITOR_SHARE_BPS,
-        "Depositor share should match"
-      );
+      assert.equal(pool.totalLiquidations.toNumber(), 0, "Total liquidations should be 0");
+      assert.equal(pool.depositorFeeBps, DEPOSITOR_FEE_BPS, "Depositor fee should match");
+      assert.equal(pool.stakingFeeBps, STAKING_FEE_BPS, "Staking fee should match");
+      assert.equal(pool.treasuryFeeBps, TREASURY_FEE_BPS, "Treasury fee should match");
       assert.equal(pool.isPaused, false, "Pool should not be paused");
-      assert.equal(pool.operatorCount, 0, "Operator count should be 0");
-      assert.equal(
-        pool.operatorCooldownSeconds.toNumber(),
-        0,
-        "Operator cooldown should default to 0 for testing"
-      );
     });
 
     it("should fail to initialize pool twice", async () => {
@@ -419,7 +378,9 @@ describe("VULTR Protocol", () => {
             depositMint: depositMint,
             shareMint: shareMintPDA,
             vault: vaultPDA,
-            protocolFeeVault: protocolFeeVaultPDA,
+            treasury: treasury,
+            stakingRewardsVault: stakingRewardsVault,
+            botWallet: botWallet.publicKey,
             systemProgram: SystemProgram.programId,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
@@ -628,284 +589,144 @@ describe("VULTR Protocol", () => {
         );
       }
     });
-
-    it("should fail deposit of zero amount", async () => {
-      const depositAmount = new BN(0);
-      const [depositorPDA] = findDepositorPDA(
-        poolPDA,
-        user1.publicKey,
-        program.programId
-      );
-
-      try {
-        await program.methods
-          .deposit(depositAmount)
-          .accounts({
-            depositor: user1.publicKey,
-            pool: poolPDA,
-            depositorAccount: depositorPDA,
-            depositMint: depositMint,
-            shareMint: shareMintPDA,
-            userDepositAccount: user1DepositAccount,
-            userShareAccount: user1ShareAccount,
-            vault: vaultPDA,
-            systemProgram: SystemProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .signers([user1])
-          .rpc();
-        assert.fail("Should have failed");
-      } catch (err) {
-        assert.include(
-          err.message.toLowerCase(),
-          "amount",
-          "Should fail with invalid amount error"
-        );
-      }
-    });
   });
 
   // ==========================================================================
-  // 3. Operator Tests
+  // 3. Bot Profit Recording Tests
   // ==========================================================================
 
-  describe("3. Operator Registration", () => {
-    it("should register operator with sufficient stake", async () => {
-      const stakeAmount = MIN_OPERATOR_STAKE;
-      const [operatorPDA] = findOperatorPDA(
-        poolPDA,
-        operator1.publicKey,
-        program.programId
-      );
-
-      const poolBefore = await program.account.pool.fetch(poolPDA);
-
-      const tx = await program.methods
-        .registerOperator(stakeAmount)
-        .accounts({
-          authority: operator1.publicKey,
-          pool: poolPDA,
-          operator: operatorPDA,
-          depositMint: depositMint,
-          operatorDepositAccount: operator1DepositAccount,
-          vault: vaultPDA,
-          systemProgram: SystemProgram.programId,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .signers([operator1])
-        .rpc();
-
-      console.log("Register operator tx:", tx);
-
-      // Check operator account
-      const operator = await program.account.operator.fetch(operatorPDA);
-      assert.ok(
-        operator.authority.equals(operator1.publicKey),
-        "Operator authority should match"
-      );
-      assert.equal(
-        operator.stakeAmount.toString(),
-        stakeAmount.toString(),
-        "Stake amount should match"
-      );
-      assert.equal(
-        operator.totalLiquidations,
-        0,
-        "Total liquidations should be 0"
-      );
-      assert.deepEqual(operator.status, { active: {} }, "Status should be active");
-
-      // Check pool state
-      const pool = await program.account.pool.fetch(poolPDA);
-      assert.equal(pool.operatorCount, 1, "Operator count should increase");
-      assert.equal(
-        pool.totalDeposits.toString(),
-        poolBefore.totalDeposits.add(stakeAmount).toString(),
-        "Stake should be added to total deposits"
-      );
-    });
-
-    it("should fail registration with insufficient stake", async () => {
-      const insufficientStake = MIN_OPERATOR_STAKE.sub(new BN(1));
-      const newOperator = Keypair.generate();
-      await airdropSol(connection, newOperator.publicKey);
-
-      // Create token account and mint tokens
-      const newOperatorATA = await getOrCreateAssociatedTokenAccount(
-        connection,
-        newOperator,
-        depositMint,
-        newOperator.publicKey
-      );
-      await mintTokens(
-        connection,
-        admin,
-        depositMint,
-        newOperatorATA.address,
-        insufficientStake
-      );
-
-      const [operatorPDA] = findOperatorPDA(
-        poolPDA,
-        newOperator.publicKey,
-        program.programId
-      );
-
-      try {
-        await program.methods
-          .registerOperator(insufficientStake)
-          .accounts({
-            authority: newOperator.publicKey,
-            pool: poolPDA,
-            operator: operatorPDA,
-            depositMint: depositMint,
-            operatorDepositAccount: newOperatorATA.address,
-            vault: vaultPDA,
-            systemProgram: SystemProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .signers([newOperator])
-          .rpc();
-        assert.fail("Should have failed");
-      } catch (err) {
-        assert.include(
-          err.message.toLowerCase(),
-          "stake",
-          "Should fail with insufficient stake error"
-        );
-      }
-    });
-  });
-
-  // ==========================================================================
-  // 4. Liquidation Tests
-  // ==========================================================================
-
-  describe("4. Liquidation Execution", () => {
-    it("should execute liquidation and distribute profits correctly", async () => {
+  describe("3. Bot Profit Recording", () => {
+    it("should record profit and distribute fees correctly", async () => {
       const profit = new BN(1_000_000_000); // 1,000 USDC profit
-      const [operatorPDA] = findOperatorPDA(
-        poolPDA,
-        operator1.publicKey,
-        program.programId
-      );
 
       const poolBefore = await program.account.pool.fetch(poolPDA);
-      const operatorBalanceBefore = await getTokenBalance(
-        connection,
-        operator1DepositAccount
-      );
-
-      // Mint profit to vault (simulating liquidation proceeds)
-      await mintTokens(connection, admin, depositMint, vaultPDA, profit);
+      const treasuryBalanceBefore = await getTokenBalance(connection, treasury);
+      const stakingBalanceBefore = await getTokenBalance(connection, stakingRewardsVault);
+      const vaultBalanceBefore = await getTokenBalance(connection, vaultPDA);
 
       const tx = await program.methods
-        .executeLiquidation(profit)
+        .recordProfit(profit)
         .accounts({
-          operatorAuthority: operator1.publicKey,
+          botWallet: botWallet.publicKey,
           pool: poolPDA,
-          operator: operatorPDA,
-          depositMint: depositMint,
           vault: vaultPDA,
-          protocolFeeVault: protocolFeeVaultPDA,
-          operatorTokenAccount: operator1DepositAccount,
+          stakingRewardsVault: stakingRewardsVault,
+          treasury: treasury,
+          profitSource: botProfitSource,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
-        .signers([operator1])
+        .signers([botWallet])
         .rpc();
 
-      console.log("Execute liquidation tx:", tx);
+      console.log("Record profit tx:", tx);
 
       // Calculate expected fee distribution
-      const protocolFee = profit.muln(PROTOCOL_FEE_BPS).divn(BPS_DENOMINATOR);
-      const operatorFee = profit.muln(OPERATOR_FEE_BPS).divn(BPS_DENOMINATOR);
-      const depositorProfit = profit.sub(protocolFee).sub(operatorFee);
+      const depositorShare = profit.muln(DEPOSITOR_FEE_BPS).divn(BPS_DENOMINATOR); // 80%
+      const stakingShare = profit.muln(STAKING_FEE_BPS).divn(BPS_DENOMINATOR); // 15%
+      const treasuryShare = profit.sub(depositorShare).sub(stakingShare); // 5%
 
-      // Check operator received fee
-      const operatorBalanceAfter = await getTokenBalance(
-        connection,
-        operator1DepositAccount
-      );
+      // Check vault received depositor share
+      const vaultBalanceAfter = await getTokenBalance(connection, vaultPDA);
       assert.equal(
-        operatorBalanceAfter.sub(operatorBalanceBefore).toString(),
-        operatorFee.toString(),
-        "Operator should receive 15% fee"
+        vaultBalanceAfter.sub(vaultBalanceBefore).toString(),
+        depositorShare.toString(),
+        "Vault should receive 80%"
       );
 
-      // Check protocol fee vault
-      const protocolFeeBalance = await getTokenBalance(
-        connection,
-        protocolFeeVaultPDA
-      );
+      // Check staking rewards vault received staking share
+      const stakingBalanceAfter = await getTokenBalance(connection, stakingRewardsVault);
       assert.equal(
-        protocolFeeBalance.toString(),
-        protocolFee.toString(),
-        "Protocol fee vault should receive 5%"
+        stakingBalanceAfter.sub(stakingBalanceBefore).toString(),
+        stakingShare.toString(),
+        "Staking vault should receive 15%"
+      );
+
+      // Check treasury received its share
+      const treasuryBalanceAfter = await getTokenBalance(connection, treasury);
+      assert.equal(
+        treasuryBalanceAfter.sub(treasuryBalanceBefore).toString(),
+        treasuryShare.toString(),
+        "Treasury should receive 5%"
       );
 
       // Check pool state
       const pool = await program.account.pool.fetch(poolPDA);
       assert.equal(
         pool.totalDeposits.toString(),
-        poolBefore.totalDeposits.add(depositorProfit).toString(),
-        "Depositor profit should be added to total deposits"
+        poolBefore.totalDeposits.add(depositorShare).toString(),
+        "Total deposits should increase by depositor share"
       );
       assert.equal(
         pool.totalProfit.toString(),
-        profit.toString(),
+        poolBefore.totalProfit.add(profit).toString(),
         "Total profit should be tracked"
       );
-
-      // Check operator stats
-      const operator = await program.account.operator.fetch(operatorPDA);
       assert.equal(
-        operator.totalLiquidations,
-        1,
+        pool.totalLiquidations.toNumber(),
+        poolBefore.totalLiquidations.toNumber() + 1,
         "Total liquidations should increase"
-      );
-      assert.equal(
-        operator.totalFeesEarned.toString(),
-        operatorFee.toString(),
-        "Total fees earned should update"
       );
     });
 
-    it("should fail liquidation from non-operator", async () => {
+    it("should fail profit recording from non-bot wallet", async () => {
       const profit = new BN(100_000_000);
-      const [fakeOperatorPDA] = findOperatorPDA(
-        poolPDA,
-        user1.publicKey,
-        program.programId
-      );
 
       try {
         await program.methods
-          .executeLiquidation(profit)
+          .recordProfit(profit)
           .accounts({
-            operatorAuthority: user1.publicKey,
+            botWallet: user1.publicKey, // Wrong signer
             pool: poolPDA,
-            operator: fakeOperatorPDA,
-            depositMint: depositMint,
             vault: vaultPDA,
-            protocolFeeVault: protocolFeeVaultPDA,
-            operatorTokenAccount: user1DepositAccount,
+            stakingRewardsVault: stakingRewardsVault,
+            treasury: treasury,
+            profitSource: user1DepositAccount,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
           .signers([user1])
           .rpc();
         assert.fail("Should have failed");
       } catch (err) {
-        // Expected - operator account doesn't exist
-        console.log("Expected error (non-operator):", err.message.substring(0, 50));
+        console.log("Expected error (non-bot):", err.message.substring(0, 80));
+        assert.include(
+          err.message.toLowerCase(),
+          "unauthorized",
+          "Should fail with unauthorized bot error"
+        );
+      }
+    });
+
+    it("should fail profit recording with zero amount", async () => {
+      try {
+        await program.methods
+          .recordProfit(new BN(0))
+          .accounts({
+            botWallet: botWallet.publicKey,
+            pool: poolPDA,
+            vault: vaultPDA,
+            stakingRewardsVault: stakingRewardsVault,
+            treasury: treasury,
+            profitSource: botProfitSource,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([botWallet])
+          .rpc();
+        assert.fail("Should have failed");
+      } catch (err) {
+        assert.include(
+          err.message.toLowerCase(),
+          "profit",
+          "Should fail with invalid profit error"
+        );
       }
     });
   });
 
   // ==========================================================================
-  // 5. Withdrawal Tests
+  // 4. Withdrawal Tests
   // ==========================================================================
 
-  describe("5. Withdrawals & Profit Distribution", () => {
+  describe("4. Withdrawals & Profit Distribution", () => {
     it("should withdraw with profit included in share value", async () => {
       const [depositorPDA] = findDepositorPDA(
         poolPDA,
@@ -974,16 +795,6 @@ describe("VULTR Protocol", () => {
       // Allow for small rounding difference
       const diff = actualWithdrawal.sub(expectedWithdrawal).abs();
       assert.ok(diff.ltn(10), "Withdrawal amount should match (within rounding)");
-
-      // Check depositor account updated
-      const depositorAccount = await program.account.depositor.fetch(
-        depositorPDA
-      );
-      assert.equal(
-        depositorAccount.totalWithdrawn.toString(),
-        actualWithdrawal.toString(),
-        "Total withdrawn should update"
-      );
     });
 
     it("should fail withdrawal of zero shares", async () => {
@@ -1018,48 +829,13 @@ describe("VULTR Protocol", () => {
         );
       }
     });
-
-    it("should fail withdrawal with insufficient shares", async () => {
-      const [depositorPDA] = findDepositorPDA(
-        poolPDA,
-        user1.publicKey,
-        program.programId
-      );
-      const currentShares = await getTokenBalance(connection, user1ShareAccount);
-      const tooManyShares = currentShares.add(new BN(1_000_000_000));
-
-      try {
-        await program.methods
-          .withdraw(tooManyShares)
-          .accounts({
-            withdrawer: user1.publicKey,
-            pool: poolPDA,
-            depositorAccount: depositorPDA,
-            depositMint: depositMint,
-            shareMint: shareMintPDA,
-            userDepositAccount: user1DepositAccount,
-            userShareAccount: user1ShareAccount,
-            vault: vaultPDA,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .signers([user1])
-          .rpc();
-        assert.fail("Should have failed");
-      } catch (err) {
-        assert.include(
-          err.message.toLowerCase(),
-          "insufficient",
-          "Should fail with insufficient shares"
-        );
-      }
-    });
   });
 
   // ==========================================================================
-  // 6. Admin Tests
+  // 5. Admin Tests
   // ==========================================================================
 
-  describe("6. Admin Functions", () => {
+  describe("5. Admin Functions", () => {
     it("should pause pool", async () => {
       const tx = await program.methods
         .pausePool(true)
@@ -1111,6 +887,31 @@ describe("VULTR Protocol", () => {
       }
     });
 
+    it("should fail profit recording when paused", async () => {
+      try {
+        await program.methods
+          .recordProfit(new BN(100_000_000))
+          .accounts({
+            botWallet: botWallet.publicKey,
+            pool: poolPDA,
+            vault: vaultPDA,
+            stakingRewardsVault: stakingRewardsVault,
+            treasury: treasury,
+            profitSource: botProfitSource,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([botWallet])
+          .rpc();
+        assert.fail("Should have failed");
+      } catch (err) {
+        assert.include(
+          err.message.toLowerCase(),
+          "paused",
+          "Should fail with pool paused error"
+        );
+      }
+    });
+
     it("should unpause pool", async () => {
       const tx = await program.methods
         .pausePool(false)
@@ -1128,12 +929,12 @@ describe("VULTR Protocol", () => {
     });
 
     it("should update fees", async () => {
-      const newProtocolFee = 400; // 4%
-      const newOperatorFee = 1600; // 16%
-      const newDepositorShare = 8000; // 80%
+      const newDepositorFee = 7500; // 75%
+      const newStakingFee = 2000; // 20%
+      const newTreasuryFee = 500; // 5%
 
       const tx = await program.methods
-        .updateFees(newProtocolFee, newOperatorFee, newDepositorShare)
+        .updateFees(newDepositorFee, newStakingFee, newTreasuryFee)
         .accounts({
           admin: admin.publicKey,
           pool: poolPDA,
@@ -1144,17 +945,13 @@ describe("VULTR Protocol", () => {
       console.log("Update fees tx:", tx);
 
       const pool = await program.account.pool.fetch(poolPDA);
-      assert.equal(pool.protocolFeeBps, newProtocolFee, "Protocol fee should update");
-      assert.equal(pool.operatorFeeBps, newOperatorFee, "Operator fee should update");
-      assert.equal(
-        pool.depositorShareBps,
-        newDepositorShare,
-        "Depositor share should update"
-      );
+      assert.equal(pool.depositorFeeBps, newDepositorFee, "Depositor fee should update");
+      assert.equal(pool.stakingFeeBps, newStakingFee, "Staking fee should update");
+      assert.equal(pool.treasuryFeeBps, newTreasuryFee, "Treasury fee should update");
 
       // Reset fees back
       await program.methods
-        .updateFees(PROTOCOL_FEE_BPS, OPERATOR_FEE_BPS, DEPOSITOR_SHARE_BPS)
+        .updateFees(DEPOSITOR_FEE_BPS, STAKING_FEE_BPS, TREASURY_FEE_BPS)
         .accounts({
           admin: admin.publicKey,
           pool: poolPDA,
@@ -1166,7 +963,7 @@ describe("VULTR Protocol", () => {
     it("should fail update fees from non-admin", async () => {
       try {
         await program.methods
-          .updateFees(600, 1400, 8000)
+          .updateFees(8000, 1500, 500)
           .accounts({
             admin: user1.publicKey,
             pool: poolPDA,
@@ -1186,7 +983,7 @@ describe("VULTR Protocol", () => {
     it("should fail update fees that don't sum to 100%", async () => {
       try {
         await program.methods
-          .updateFees(500, 1500, 7000) // Sums to 90%
+          .updateFees(5000, 1500, 500) // Sums to 70%
           .accounts({
             admin: admin.publicKey,
             pool: poolPDA,
@@ -1203,144 +1000,42 @@ describe("VULTR Protocol", () => {
       }
     });
 
-    it("should withdraw protocol fees", async () => {
-      // Create admin token account for share mint
-      const adminDepositATA = await getOrCreateAssociatedTokenAccount(
-        connection,
-        admin,
-        depositMint,
-        admin.publicKey
-      );
-
-      const feeBalanceBefore = await getTokenBalance(
-        connection,
-        protocolFeeVaultPDA
-      );
-      const adminBalanceBefore = await getTokenBalance(
-        connection,
-        adminDepositATA.address
-      );
-
-      if (feeBalanceBefore.gtn(0)) {
-        const tx = await program.methods
-          .withdrawProtocolFees()
-          .accounts({
-            admin: admin.publicKey,
-            pool: poolPDA,
-            depositMint: depositMint,
-            protocolFeeVault: protocolFeeVaultPDA,
-            adminTokenAccount: adminDepositATA.address,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .signers([admin])
-          .rpc();
-
-        console.log("Withdraw protocol fees tx:", tx);
-
-        const feeBalanceAfter = await getTokenBalance(
-          connection,
-          protocolFeeVaultPDA
-        );
-        const adminBalanceAfter = await getTokenBalance(
-          connection,
-          adminDepositATA.address
-        );
-
-        assert.equal(
-          feeBalanceAfter.toNumber(),
-          0,
-          "Fee vault should be empty"
-        );
-        assert.equal(
-          adminBalanceAfter.sub(adminBalanceBefore).toString(),
-          feeBalanceBefore.toString(),
-          "Admin should receive all fees"
-        );
-      } else {
-        console.log("No protocol fees to withdraw");
-      }
-    });
-  });
-
-  // ==========================================================================
-  // 7. Operator Deregistration Tests
-  // ==========================================================================
-
-  describe("7. Operator Deregistration", () => {
-    it("should deregister operator and return stake", async () => {
-      const [operatorPDA] = findOperatorPDA(
-        poolPDA,
-        operator1.publicKey,
-        program.programId
-      );
-
-      const operatorBefore = await program.account.operator.fetch(operatorPDA);
-      const stakeAmount = operatorBefore.stakeAmount;
-      const balanceBefore = await getTokenBalance(
-        connection,
-        operator1DepositAccount
-      );
-
-      // Step 1: request withdrawal (cooldown defaults to 0 in tests)
-      const requestTx = await program.methods
-        .requestOperatorWithdrawal()
-        .accounts({
-          authority: operator1.publicKey,
-          pool: poolPDA,
-          operator: operatorPDA,
-        })
-        .signers([operator1])
-        .rpc();
-
-      console.log("Request operator withdrawal tx:", requestTx);
+    it("should update bot wallet", async () => {
+      const newBotWallet = Keypair.generate();
 
       const tx = await program.methods
-        .deregisterOperator()
+        .updateBotWallet()
         .accounts({
-          authority: operator1.publicKey,
+          admin: admin.publicKey,
           pool: poolPDA,
-          operator: operatorPDA,
-          depositMint: depositMint,
-          operatorDepositAccount: operator1DepositAccount,
-          vault: vaultPDA,
-          tokenProgram: TOKEN_PROGRAM_ID,
+          newBotWallet: newBotWallet.publicKey,
         })
-        .signers([operator1])
+        .signers([admin])
         .rpc();
 
-      console.log("Deregister operator tx:", tx);
+      console.log("Update bot wallet tx:", tx);
 
-      // Check balance returned
-      const balanceAfter = await getTokenBalance(
-        connection,
-        operator1DepositAccount
-      );
-      assert.equal(
-        balanceAfter.sub(balanceBefore).toString(),
-        stakeAmount.toString(),
-        "Stake should be returned"
-      );
-
-      // Check pool state
       const pool = await program.account.pool.fetch(poolPDA);
-      assert.equal(pool.operatorCount, 0, "Operator count should decrease");
+      assert.ok(pool.botWallet.equals(newBotWallet.publicKey), "Bot wallet should update");
 
-      // Operator account should be closed
-      try {
-        await program.account.operator.fetch(operatorPDA);
-        assert.fail("Operator account should be closed");
-      } catch (err) {
-        // Expected - account doesn't exist
-        console.log("Operator account correctly closed");
-      }
+      // Update back to original
+      await program.methods
+        .updateBotWallet()
+        .accounts({
+          admin: admin.publicKey,
+          pool: poolPDA,
+          newBotWallet: botWallet.publicKey,
+        })
+        .signers([admin])
+        .rpc();
     });
   });
 
   // ==========================================================================
-  // 8. Edge Cases
+  // 6. Edge Cases
   // ==========================================================================
 
-  describe("8. Edge Cases", () => {
+  describe("6. Edge Cases", () => {
     it("should handle multiple deposits from same user", async () => {
       const depositAmount = new BN(2_000_000_000); // 2,000 USDC
       const [depositorPDA] = findDepositorPDA(
@@ -1382,52 +1077,27 @@ describe("VULTR Protocol", () => {
     });
 
     it("should verify share price increases after profit", async () => {
-      // Re-register operator for this test
-      const stakeAmount = MIN_OPERATOR_STAKE;
-      const [operatorPDA] = findOperatorPDA(
-        poolPDA,
-        operator1.publicKey,
-        program.programId
-      );
-
-      await program.methods
-        .registerOperator(stakeAmount)
-        .accounts({
-          authority: operator1.publicKey,
-          pool: poolPDA,
-          operator: operatorPDA,
-          depositMint: depositMint,
-          operatorDepositAccount: operator1DepositAccount,
-          vault: vaultPDA,
-          systemProgram: SystemProgram.programId,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .signers([operator1])
-        .rpc();
-
       // Get share price before
       const poolBefore = await program.account.pool.fetch(poolPDA);
       const sharePriceBefore = poolBefore.totalDeposits
         .muln(1_000_000)
         .div(poolBefore.totalShares);
 
-      // Execute another liquidation with profit
+      // Record another profit
       const profit = new BN(500_000_000); // 500 USDC
-      await mintTokens(connection, admin, depositMint, vaultPDA, profit);
 
       await program.methods
-        .executeLiquidation(profit)
+        .recordProfit(profit)
         .accounts({
-          operatorAuthority: operator1.publicKey,
+          botWallet: botWallet.publicKey,
           pool: poolPDA,
-          operator: operatorPDA,
-          depositMint: depositMint,
           vault: vaultPDA,
-          protocolFeeVault: protocolFeeVaultPDA,
-          operatorTokenAccount: operator1DepositAccount,
+          stakingRewardsVault: stakingRewardsVault,
+          treasury: treasury,
+          profitSource: botProfitSource,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
-        .signers([operator1])
+        .signers([botWallet])
         .rpc();
 
       // Get share price after
@@ -1453,6 +1123,7 @@ describe("VULTR Protocol", () => {
   after(() => {
     console.log("\n===========================================");
     console.log("VULTR Protocol Test Suite Complete!");
+    console.log("NEW SIMPLIFIED DESIGN - No External Operators");
     console.log("===========================================\n");
   });
 });

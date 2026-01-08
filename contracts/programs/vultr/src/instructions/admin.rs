@@ -1,21 +1,16 @@
 // =============================================================================
-// Admin Instructions
+// Admin Instructions - NEW SIMPLIFIED DESIGN
 // =============================================================================
 // Administrative functions that only the pool admin can call.
 //
-// Functions:
-// - pause_pool: Emergency pause/unpause
-// - update_fees: Adjust fee percentages
-// - withdraw_protocol_fees: Collect accumulated protocol fees
-// - transfer_admin: Transfer admin rights to new address
-//
-// Security:
-// - All functions require admin signature
-// - Admin should be a multisig in production
+// KEY CHANGES FROM OLD DESIGN:
+// - Removed: update_operator_cooldown, update_slippage_tolerance
+// - Removed: withdraw_protocol_fees (treasury is now external)
+// - Added: update_bot_wallet (change authorized bot address)
+// - Updated: update_fees uses new field names (staking_fee_bps, etc.)
 // =============================================================================
 
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 use crate::constants::*;
 use crate::error::VultrError;
@@ -51,7 +46,6 @@ pub struct PausePool<'info> {
 pub fn handler_pause_pool(ctx: Context<PausePool>, paused: bool) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
 
-    // Check if already in the desired state
     if pool.is_paused == paused {
         msg!(
             "Pool is already {}",
@@ -96,35 +90,36 @@ pub struct UpdateFees<'info> {
 /// Handler for update_fees instruction
 ///
 /// # Arguments
-/// * `ctx` - The instruction context
-/// * `protocol_fee_bps` - New protocol fee (0-10000)
-/// * `operator_fee_bps` - New operator fee (0-10000)
-/// * `depositor_share_bps` - New depositor share (0-10000)
+/// * `depositor_fee_bps` - Depositor share (default 8000 = 80%)
+/// * `staking_fee_bps` - VLTR staker share (default 1500 = 15%)
+/// * `treasury_fee_bps` - Treasury share (default 500 = 5%)
 ///
 /// Note: All three must sum to exactly 10000 (100%)
 pub fn handler_update_fees(
     ctx: Context<UpdateFees>,
-    protocol_fee_bps: u16,
-    operator_fee_bps: u16,
-    depositor_share_bps: u16,
+    depositor_fee_bps: u16,
+    staking_fee_bps: u16,
+    treasury_fee_bps: u16,
 ) -> Result<()> {
     // =========================================================================
     // Validation
     // =========================================================================
 
     // Check fees sum to 100%
-    let total_bps = (protocol_fee_bps as u32)
-        .checked_add(operator_fee_bps as u32)
+    let total_bps = (depositor_fee_bps as u32)
+        .checked_add(staking_fee_bps as u32)
         .ok_or(VultrError::MathOverflow)?
-        .checked_add(depositor_share_bps as u32)
+        .checked_add(treasury_fee_bps as u32)
         .ok_or(VultrError::MathOverflow)?;
 
     require!(total_bps == 10000, VultrError::InvalidFeeConfig);
 
-    // Optional: Add maximum limits for individual fees
-    // e.g., protocol fee shouldn't exceed 20%
-    require!(protocol_fee_bps <= 2000, VultrError::FeeExceedsMax);
-    require!(operator_fee_bps <= 3000, VultrError::FeeExceedsMax);
+    // Depositor share should be at least 50%
+    require!(depositor_fee_bps >= 5000, VultrError::FeeExceedsMax);
+
+    // Staking and treasury shares have reasonable limits
+    require!(staking_fee_bps <= 3000, VultrError::FeeExceedsMax);
+    require!(treasury_fee_bps <= 2000, VultrError::FeeExceedsMax);
 
     // =========================================================================
     // Update Pool State
@@ -132,13 +127,13 @@ pub fn handler_update_fees(
 
     let pool = &mut ctx.accounts.pool;
 
-    let old_protocol = pool.protocol_fee_bps;
-    let old_operator = pool.operator_fee_bps;
-    let old_depositor = pool.depositor_share_bps;
+    let old_depositor = pool.depositor_fee_bps;
+    let old_staking = pool.staking_fee_bps;
+    let old_treasury = pool.treasury_fee_bps;
 
-    pool.protocol_fee_bps = protocol_fee_bps;
-    pool.operator_fee_bps = operator_fee_bps;
-    pool.depositor_share_bps = depositor_share_bps;
+    pool.depositor_fee_bps = depositor_fee_bps;
+    pool.staking_fee_bps = staking_fee_bps;
+    pool.treasury_fee_bps = treasury_fee_bps;
 
     // Validate the new configuration
     pool.validate_fees()?;
@@ -149,73 +144,27 @@ pub fn handler_update_fees(
 
     msg!("Fees updated by admin {}", ctx.accounts.admin.key());
     msg!(
-        "Protocol fee: {} -> {} BPS",
-        old_protocol,
-        protocol_fee_bps
-    );
-    msg!("Operator fee: {} -> {} BPS", old_operator, operator_fee_bps);
-    msg!(
-        "Depositor share: {} -> {} BPS",
+        "Depositor fee: {} -> {} BPS",
         old_depositor,
-        depositor_share_bps
+        depositor_fee_bps
     );
-
-    Ok(())
-}
-
-// =============================================================================
-// Update Operator Cooldown
-// =============================================================================
-
-/// Accounts required for update_operator_cooldown instruction
-#[derive(Accounts)]
-pub struct UpdateOperatorCooldown<'info> {
-    /// The admin must sign
-    #[account(
-        constraint = admin.key() == pool.admin @ VultrError::AdminOnly
-    )]
-    pub admin: Signer<'info>,
-
-    /// The pool to update
-    #[account(
-        mut,
-        seeds = [POOL_SEED, pool.deposit_mint.as_ref()],
-        bump = pool.bump
-    )]
-    pub pool: Account<'info, Pool>,
-}
-
-/// Handler for update_operator_cooldown instruction
-///
-/// # Arguments
-/// * `cooldown_seconds` - Cooldown in seconds (0 = immediate after request)
-pub fn handler_update_operator_cooldown(
-    ctx: Context<UpdateOperatorCooldown>,
-    cooldown_seconds: i64,
-) -> Result<()> {
-    require!(cooldown_seconds >= 0, VultrError::InvalidAmount);
-
-    let pool = &mut ctx.accounts.pool;
-    let old = pool.operator_cooldown_seconds;
-    pool.operator_cooldown_seconds = cooldown_seconds;
-
+    msg!("Staking fee: {} -> {} BPS", old_staking, staking_fee_bps);
     msg!(
-        "Operator cooldown updated by admin {}: {}s -> {}s",
-        ctx.accounts.admin.key(),
-        old,
-        cooldown_seconds
+        "Treasury fee: {} -> {} BPS",
+        old_treasury,
+        treasury_fee_bps
     );
 
     Ok(())
 }
 
 // =============================================================================
-// Update Slippage Tolerance
+// Update Bot Wallet
 // =============================================================================
 
-/// Accounts required for update_slippage_tolerance instruction
+/// Accounts required for update_bot_wallet instruction
 #[derive(Accounts)]
-pub struct UpdateSlippageTolerance<'info> {
+pub struct UpdateBotWallet<'info> {
     /// The admin must sign
     #[account(
         constraint = admin.key() == pool.admin @ VultrError::AdminOnly
@@ -229,152 +178,32 @@ pub struct UpdateSlippageTolerance<'info> {
         bump = pool.bump
     )]
     pub pool: Account<'info, Pool>,
+
+    /// The new bot wallet address
+    /// CHECK: This is just the new bot wallet address, we just store it
+    pub new_bot_wallet: UncheckedAccount<'info>,
 }
 
-/// Handler for update_slippage_tolerance instruction
+/// Handler for update_bot_wallet instruction
 ///
-/// Updates the maximum allowed slippage for Jupiter swaps during liquidations.
-///
-/// # Arguments
-/// * `max_slippage_bps` - Maximum slippage in basis points (0-1000)
-///   - 100 BPS = 1%
-///   - 300 BPS = 3% (recommended)
-///   - 1000 BPS = 10% (maximum)
-///
-/// # Security
-/// Slippage tolerance protects against MEV attacks and bad swap routes.
-/// Setting it too high exposes the pool to price manipulation.
-pub fn handler_update_slippage_tolerance(
-    ctx: Context<UpdateSlippageTolerance>,
-    max_slippage_bps: u16,
-) -> Result<()> {
-    // =========================================================================
-    // Validation
-    // =========================================================================
+/// Updates the authorized bot wallet address. Useful for key rotation
+/// or when upgrading the bot.
+pub fn handler_update_bot_wallet(ctx: Context<UpdateBotWallet>) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    let old_bot_wallet = pool.bot_wallet;
+    let new_bot_wallet = ctx.accounts.new_bot_wallet.key();
 
-    // Maximum slippage is 10% (1000 BPS)
+    // Validate new bot wallet is not zero address
     require!(
-        max_slippage_bps <= 1000,
-        VultrError::InvalidSlippageTolerance
+        new_bot_wallet != Pubkey::default(),
+        VultrError::InvalidAuthority
     );
 
-    // =========================================================================
-    // Update Pool State
-    // =========================================================================
+    pool.bot_wallet = new_bot_wallet;
 
-    let pool = &mut ctx.accounts.pool;
-    let old_slippage = pool.max_slippage_bps;
-    pool.max_slippage_bps = max_slippage_bps;
-
-    // =========================================================================
-    // Log Results
-    // =========================================================================
-
-    msg!(
-        "Slippage tolerance updated by admin {}: {} -> {} BPS ({:.2}% -> {:.2}%)",
-        ctx.accounts.admin.key(),
-        old_slippage,
-        max_slippage_bps,
-        old_slippage as f64 / 100.0,
-        max_slippage_bps as f64 / 100.0
-    );
-
-    Ok(())
-}
-
-// =============================================================================
-// Withdraw Protocol Fees
-// =============================================================================
-
-/// Accounts required for withdraw_protocol_fees instruction
-#[derive(Accounts)]
-pub struct WithdrawProtocolFees<'info> {
-    /// The admin must sign
-    #[account(
-        mut,
-        constraint = admin.key() == pool.admin @ VultrError::AdminOnly
-    )]
-    pub admin: Signer<'info>,
-
-    /// The pool
-    #[account(
-        mut,
-        seeds = [POOL_SEED, pool.deposit_mint.as_ref()],
-        bump = pool.bump
-    )]
-    pub pool: Account<'info, Pool>,
-
-    /// The deposit mint
-    pub deposit_mint: Account<'info, Mint>,
-
-    /// The protocol fee vault (source)
-    #[account(
-        mut,
-        seeds = [PROTOCOL_FEE_VAULT_SEED, pool.key().as_ref()],
-        bump = pool.protocol_fee_vault_bump
-    )]
-    pub protocol_fee_vault: Account<'info, TokenAccount>,
-
-    /// Admin's token account (destination)
-    #[account(
-        mut,
-        constraint = admin_token_account.mint == deposit_mint.key() @ VultrError::InvalidDepositMint,
-        constraint = admin_token_account.owner == admin.key() @ VultrError::InvalidTokenAccountOwner
-    )]
-    pub admin_token_account: Account<'info, TokenAccount>,
-
-    pub token_program: Program<'info, Token>,
-}
-
-/// Handler for withdraw_protocol_fees instruction
-///
-/// Withdraws accumulated protocol fees to the admin's token account.
-pub fn handler_withdraw_protocol_fees(ctx: Context<WithdrawProtocolFees>) -> Result<()> {
-    let amount = ctx.accounts.protocol_fee_vault.amount;
-
-    // Check there are fees to withdraw
-    require!(amount > 0, VultrError::InsufficientBalance);
-
-    msg!("Withdrawing {} protocol fees", amount);
-
-    // =========================================================================
-    // Transfer Fees: Protocol Fee Vault -> Admin
-    // =========================================================================
-
-    let deposit_mint_key = ctx.accounts.deposit_mint.key();
-    let pool_seeds = &[
-        POOL_SEED,
-        deposit_mint_key.as_ref(),
-        &[ctx.accounts.pool.bump],
-    ];
-    let signer_seeds = &[&pool_seeds[..]];
-
-    let transfer_ctx = CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
-        Transfer {
-            from: ctx.accounts.protocol_fee_vault.to_account_info(),
-            to: ctx.accounts.admin_token_account.to_account_info(),
-            authority: ctx.accounts.pool.to_account_info(),
-        },
-        signer_seeds,
-    );
-
-    token::transfer(transfer_ctx, amount)?;
-
-    // =========================================================================
-    // Reset Accumulated Fees Tracker
-    // =========================================================================
-
-    let pool = &mut ctx.accounts.pool;
-    pool.accumulated_protocol_fees = 0;
-
-    // =========================================================================
-    // Log Results
-    // =========================================================================
-
-    msg!("Protocol fees withdrawn successfully!");
-    msg!("Amount: {}", amount);
-    msg!("Recipient: {}", ctx.accounts.admin.key());
+    msg!("Bot wallet updated by admin {}", ctx.accounts.admin.key());
+    msg!("Old bot wallet: {}", old_bot_wallet);
+    msg!("New bot wallet: {}", new_bot_wallet);
 
     Ok(())
 }
@@ -400,17 +229,12 @@ pub struct TransferAdmin<'info> {
     )]
     pub pool: Account<'info, Pool>,
 
-    /// The new admin (doesn't need to sign - it's a gift!)
+    /// The new admin
     /// CHECK: This is just the new admin address, we just store it
     pub new_admin: UncheckedAccount<'info>,
 }
 
 /// Handler for transfer_admin instruction
-///
-/// # Arguments
-/// * `ctx` - The instruction context
-///
-/// NOTE: In production, consider a two-step transfer where new admin must accept
 pub fn handler_transfer_admin(ctx: Context<TransferAdmin>) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     let old_admin = pool.admin;

@@ -1,15 +1,13 @@
 // =============================================================================
-// Initialize Pool Instruction
+// Initialize Pool Instruction - NEW SIMPLIFIED DESIGN
 // =============================================================================
-// Creates a new VULTR liquidation pool. This is called once per deposit token
-// (e.g., once to create a USDC pool).
+// Creates a new VULTR liquidation pool.
 //
-// What this instruction does:
-// 1. Creates the Pool PDA account to store pool state
-// 2. Creates the vault token account to hold deposited tokens
-// 3. Creates the share mint (VLTR token) for this pool
-// 4. Creates the protocol fee vault
-// 5. Sets initial configuration (admin, fees, etc.)
+// KEY CHANGES FROM OLD DESIGN:
+// - Added bot_wallet parameter (the team's bot wallet address)
+// - Added staking_rewards_vault (external account for VLTR staker rewards)
+// - Treasury is now an external account (not a PDA)
+// - Removed operator-related configuration
 // =============================================================================
 
 use anchor_lang::prelude::*;
@@ -19,9 +17,6 @@ use crate::constants::*;
 use crate::state::Pool;
 
 /// Accounts required for the initialize_pool instruction.
-///
-/// This is an Anchor "Accounts" struct - it defines what accounts
-/// the instruction needs and how to validate them.
 #[derive(Accounts)]
 pub struct InitializePool<'info> {
     // =========================================================================
@@ -30,7 +25,6 @@ pub struct InitializePool<'info> {
 
     /// The admin who will control the pool
     /// Must sign this transaction and will be stored as pool.admin
-    /// This wallet should be a multisig in production!
     #[account(mut)]
     pub admin: Signer<'info>,
 
@@ -39,13 +33,6 @@ pub struct InitializePool<'info> {
     // =========================================================================
 
     /// The Pool account to create
-    ///
-    /// Constraints explained:
-    /// - init: Create this account
-    /// - payer = admin: Admin pays for account rent
-    /// - space: Size of the account data
-    /// - seeds: PDA derivation ["pool", deposit_mint]
-    /// - bump: Anchor finds the bump automatically during init
     #[account(
         init,
         payer = admin,
@@ -60,13 +47,9 @@ pub struct InitializePool<'info> {
     // =========================================================================
 
     /// The token users will deposit (e.g., USDC)
-    /// We just need to read its address, not modify it
     pub deposit_mint: Account<'info, Mint>,
 
-    /// The share token mint (VLTR) - created by this instruction
-    ///
-    /// This is a PDA-controlled mint, meaning only this program can mint/burn
-    /// The mint authority is set to the pool PDA
+    /// The share token mint (sVLTR) - created by this instruction
     #[account(
         init,
         payer = admin,
@@ -78,11 +61,10 @@ pub struct InitializePool<'info> {
     pub share_mint: Account<'info, Mint>,
 
     // =========================================================================
-    // Token Accounts (Vaults)
+    // Token Accounts
     // =========================================================================
 
-    /// The vault that holds deposited tokens
-    /// This is a token account owned by the pool PDA
+    /// The vault that holds deposited tokens (PDA-owned)
     #[account(
         init,
         payer = admin,
@@ -93,17 +75,26 @@ pub struct InitializePool<'info> {
     )]
     pub vault: Account<'info, TokenAccount>,
 
-    /// The vault that accumulates protocol fees
-    /// Separate from main vault for clear accounting
+    /// The treasury account for protocol fees (5%)
+    /// This is an EXTERNAL token account, not a PDA
+    /// Admin should create this beforehand
     #[account(
-        init,
-        payer = admin,
-        token::mint = deposit_mint,
-        token::authority = pool,
-        seeds = [PROTOCOL_FEE_VAULT_SEED, pool.key().as_ref()],
-        bump
+        constraint = treasury.mint == deposit_mint.key() @ crate::error::VultrError::InvalidDepositMint,
     )]
-    pub protocol_fee_vault: Account<'info, TokenAccount>,
+    pub treasury: Account<'info, TokenAccount>,
+
+    /// The staking rewards vault for VLTR stakers (15%)
+    /// This is an EXTERNAL token account, not a PDA
+    /// Admin should create this beforehand
+    #[account(
+        constraint = staking_rewards_vault.mint == deposit_mint.key() @ crate::error::VultrError::InvalidDepositMint,
+    )]
+    pub staking_rewards_vault: Account<'info, TokenAccount>,
+
+    /// The bot wallet address that will be authorized to call record_profit
+    /// This is just checked as a valid pubkey
+    /// CHECK: This is the team's bot wallet address, validated by admin
+    pub bot_wallet: UncheckedAccount<'info>,
 
     // =========================================================================
     // Programs
@@ -117,11 +108,7 @@ pub struct InitializePool<'info> {
 }
 
 /// Handler function for initialize_pool
-///
-/// This is where the actual logic lives. The accounts have already been
-/// validated by Anchor based on the constraints in InitializePool.
 pub fn handler_initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
-    // Get the pool account (mutable reference so we can write to it)
     let pool = &mut ctx.accounts.pool;
 
     // =========================================================================
@@ -129,10 +116,12 @@ pub fn handler_initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
     // =========================================================================
 
     pool.admin = ctx.accounts.admin.key();
+    pool.bot_wallet = ctx.accounts.bot_wallet.key();
     pool.deposit_mint = ctx.accounts.deposit_mint.key();
     pool.share_mint = ctx.accounts.share_mint.key();
     pool.vault = ctx.accounts.vault.key();
-    pool.protocol_fee_vault = ctx.accounts.protocol_fee_vault.key();
+    pool.treasury = ctx.accounts.treasury.key();
+    pool.staking_rewards_vault = ctx.accounts.staking_rewards_vault.key();
 
     // =========================================================================
     // Initialize financial state
@@ -141,66 +130,43 @@ pub fn handler_initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
     pool.total_deposits = 0;
     pool.total_shares = 0;
     pool.total_profit = 0;
-    pool.accumulated_protocol_fees = 0;
+    pool.total_liquidations = 0;
 
     // =========================================================================
-    // Set default fee configuration (can be updated by admin later)
+    // Set default fee configuration (80/15/5 split)
     // =========================================================================
 
-    pool.protocol_fee_bps = PROTOCOL_FEE_BPS;
-    pool.operator_fee_bps = OPERATOR_FEE_BPS;
-    pool.depositor_share_bps = DEPOSITOR_SHARE_BPS;
+    pool.depositor_fee_bps = DEPOSITOR_FEE_BPS;   // 80%
+    pool.staking_fee_bps = STAKING_FEE_BPS;       // 15%
+    pool.treasury_fee_bps = TREASURY_FEE_BPS;     // 5%
 
     // Validate that fees sum to 100%
     pool.validate_fees()?;
 
     // =========================================================================
-    // Initialize operator tracking
-    // =========================================================================
-
-    pool.operator_count = 0;
-
-    // =========================================================================
-    // Set pool status
+    // Set pool status and configuration
     // =========================================================================
 
     pool.is_paused = false;
+    pool.max_pool_size = DEFAULT_POOL_SIZE;
 
     // =========================================================================
     // Store PDA bumps
-    // These are stored so we don't have to recalculate them every time
     // =========================================================================
 
     pool.bump = ctx.bumps.pool;
     pool.vault_bump = ctx.bumps.vault;
     pool.share_mint_bump = ctx.bumps.share_mint;
-    pool.protocol_fee_vault_bump = ctx.bumps.protocol_fee_vault;
-
-    // =========================================================================
-    // Operator Withdrawal Configuration (devnet-friendly defaults)
-    // =========================================================================
-
-    // Default to 7 days (604,800 seconds) for production security.
-    // This prevents operators from executing malicious liquidations and immediately withdrawing.
-    // Admin can adjust via update_operator_cooldown instruction if needed.
-    pool.operator_cooldown_seconds = 604_800;
-
-    // =========================================================================
-    // Liquidation Configuration
-    // =========================================================================
-
-    // Default to 3% slippage tolerance (300 BPS) for Jupiter swaps.
-    // This protects against MEV attacks and bad swap routes while allowing
-    // reasonable price impact for liquidations. Admin can adjust via
-    // update_slippage_tolerance instruction if needed.
-    pool.max_slippage_bps = 300;
 
     // Log success message
     msg!("VULTR Pool initialized successfully!");
     msg!("Pool: {}", pool.key());
+    msg!("Bot Wallet: {}", pool.bot_wallet);
     msg!("Deposit Mint: {}", pool.deposit_mint);
     msg!("Share Mint: {}", pool.share_mint);
     msg!("Vault: {}", pool.vault);
+    msg!("Treasury: {}", pool.treasury);
+    msg!("Staking Rewards: {}", pool.staking_rewards_vault);
 
     Ok(())
 }

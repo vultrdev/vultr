@@ -1,26 +1,23 @@
 // =============================================================================
-// VULTR Error Codes
+// VULTR Error Codes - NEW SIMPLIFIED DESIGN
 // =============================================================================
-// Custom errors that the VULTR program can return. Each error has a unique code
-// and a human-readable message. The error code is used on-chain (saves space),
-// while the message helps developers debug issues.
+// Custom errors that the VULTR program can return.
+//
+// KEY CHANGES FROM OLD DESIGN:
+// - Operator errors REMOVED (no external operators)
+// - Added UnauthorizedBot for bot_wallet checks
 // =============================================================================
 
 use anchor_lang::prelude::*;
 
 /// All possible errors that the VULTR program can return.
-///
-/// In Anchor, errors are automatically assigned numeric codes starting from 6000.
-/// When a transaction fails, you'll see the error code in logs - use this enum
-/// to understand what went wrong.
 #[error_code]
 pub enum VultrError {
     // =========================================================================
     // Pool State Errors (6000-6009)
     // =========================================================================
 
-    /// The pool has been paused by admin - no deposits, withdrawals, or liquidations allowed
-    /// This is an emergency safety measure
+    /// The pool has been paused by admin - no operations allowed
     #[msg("Pool is currently paused")]
     PoolPaused,
 
@@ -40,15 +37,15 @@ pub enum VultrError {
     #[msg("Insufficient balance for operation")]
     InsufficientBalance,
 
-    /// Trying to deposit/withdraw/stake 0 tokens - that's not allowed
+    /// Trying to deposit/withdraw 0 tokens - not allowed
     #[msg("Amount must be greater than zero")]
     InvalidAmount,
 
-    /// Deposit is below the minimum (1 USDC) - prevents dust attacks
+    /// Deposit is below the minimum (1 USDC)
     #[msg("Amount is below minimum deposit")]
     BelowMinimumDeposit,
 
-    /// Deposit would exceed the maximum pool size - risk management
+    /// Deposit would exceed the maximum pool size
     #[msg("Amount exceeds maximum pool size")]
     ExceedsMaxPoolSize,
 
@@ -57,42 +54,10 @@ pub enum VultrError {
     ExceedsMaxDeposit,
 
     // =========================================================================
-    // Operator Errors (6020-6029)
+    // Fee & Configuration Errors (6020-6029)
     // =========================================================================
 
-    /// Trying to become an operator without enough stake
-    #[msg("Stake amount is below minimum required")]
-    InsufficientStake,
-
-    /// Trying to perform operator action but not registered/active
-    #[msg("Operator is not active")]
-    OperatorNotActive,
-
-    /// Trying to register as operator but already registered
-    #[msg("Already registered as operator")]
-    OperatorAlreadyRegistered,
-
-    /// Operator has pending obligations and can't deregister yet
-    #[msg("Operator has pending liquidations")]
-    OperatorHasPendingLiquidations,
-
-    /// Operator must request withdrawal before withdrawing stake
-    #[msg("Operator withdrawal has not been requested")]
-    OperatorWithdrawalNotRequested,
-
-    /// Operator is not in withdrawing state
-    #[msg("Operator is not withdrawing")]
-    OperatorNotWithdrawing,
-
-    /// Operator cooldown has not elapsed yet
-    #[msg("Operator cooldown has not elapsed")]
-    OperatorCooldownNotElapsed,
-
-    // =========================================================================
-    // Fee & Configuration Errors (6030-6039)
-    // =========================================================================
-
-    /// Fee percentages don't add up to 100% or exceed limits
+    /// Fee percentages don't add up to 100%
     #[msg("Invalid fee configuration - fees must sum to 100%")]
     InvalidFeeConfig,
 
@@ -100,8 +65,12 @@ pub enum VultrError {
     #[msg("Fee exceeds maximum allowed")]
     FeeExceedsMax,
 
+    /// Invalid pool cap configuration
+    #[msg("Invalid pool cap - must be between current TVL and MAX_POOL_SIZE")]
+    InvalidPoolCap,
+
     // =========================================================================
-    // Authorization Errors (6040-6049)
+    // Authorization Errors (6030-6039)
     // =========================================================================
 
     /// Caller is not authorized to perform this action
@@ -116,28 +85,33 @@ pub enum VultrError {
     #[msg("Invalid authority")]
     InvalidAuthority,
 
+    /// The signer is not the authorized bot_wallet
+    /// Only the team's bot can call record_profit
+    #[msg("Unauthorized - signer is not the bot wallet")]
+    UnauthorizedBot,
+
     // =========================================================================
-    // Math & Overflow Errors (6050-6059)
+    // Math & Overflow Errors (6040-6049)
     // =========================================================================
 
-    /// A calculation would overflow - this should never happen in normal operation
+    /// A calculation would overflow
     #[msg("Math overflow - calculation exceeded maximum value")]
     MathOverflow,
 
-    /// A calculation would underflow - trying to subtract more than available
+    /// A calculation would underflow
     #[msg("Math underflow - result would be negative")]
     MathUnderflow,
 
-    /// Division by zero - usually means pool is empty when it shouldn't be
+    /// Division by zero
     #[msg("Division by zero")]
     DivisionByZero,
 
-    /// Generic arithmetic error (overflow, underflow, etc.)
+    /// Generic arithmetic error
     #[msg("Arithmetic error in calculation")]
     ArithmeticError,
 
     // =========================================================================
-    // Account Validation Errors (6060-6069)
+    // Account Validation Errors (6050-6059)
     // =========================================================================
 
     /// The deposit mint doesn't match what the pool was initialized with
@@ -169,52 +143,19 @@ pub enum VultrError {
     MissingRequiredAccounts,
 
     // =========================================================================
-    // Liquidation Errors (6070-6079)
-    // For production liquidation via Marginfi + Jupiter
+    // Profit Recording Errors (6060-6069)
     // =========================================================================
 
-    /// The position is not eligible for liquidation (health factor > 1.0)
-    #[msg("Position is not liquidatable - health factor is healthy")]
-    PositionNotLiquidatable,
-
-    /// Insufficient collateral received from Marginfi liquidation
-    #[msg("Insufficient collateral received from liquidation")]
-    InsufficientCollateral,
+    /// No profit to record (amount is zero or negative)
+    #[msg("Invalid profit - amount must be greater than zero")]
+    InvalidProfit,
 
     /// Slippage protection triggered - swap output below minimum
     #[msg("Slippage tolerance exceeded - swap output too low")]
     SlippageExceeded,
 
-    /// No profit generated from liquidation (or net loss)
-    #[msg("Invalid liquidation - no profit generated")]
-    NoProfit,
-
-    /// The provided margin account is invalid or not found
-    #[msg("Invalid Marginfi margin account")]
-    InvalidMarginAccount,
-
-    /// The collateral mint doesn't match expected token
-    #[msg("Invalid collateral mint")]
-    InvalidCollateralMint,
-
-    /// Liquidation amount exceeds maximum allowed
-    #[msg("Liquidation amount exceeds maximum")]
-    LiquidationExceedsMax,
-
-    /// Invalid slippage tolerance configuration
-    #[msg("Invalid slippage tolerance - must be <= 10%")]
-    InvalidSlippageTolerance,
-
-    /// Marginfi CPI call failed
-    #[msg("Marginfi liquidation CPI failed")]
-    MarginfiCpiFailed,
-
-    /// Jupiter swap CPI call failed
-    #[msg("Jupiter swap CPI failed")]
-    JupiterCpiFailed,
-
     // =========================================================================
-    // Share Calculation Errors (6080-6089)
+    // Share Calculation Errors (6070-6079)
     // =========================================================================
 
     /// User doesn't have enough shares to burn for this withdrawal

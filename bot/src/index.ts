@@ -161,6 +161,18 @@ class VultrBot {
     // Print final stats
     this.printStats();
 
+    // Report any stuck collateral
+    const stuckCollateral = this.executor.getStuckCollateral();
+    if (stuckCollateral.length > 0) {
+      this.logger.warn(`Stuck collateral to recover: ${stuckCollateral.length} tokens`);
+      for (const stuck of stuckCollateral) {
+        this.logger.warn(
+          `  - ${stuck.mint.toBase58().slice(0, 8)}...: ${stuck.amount.toString()} units ` +
+          `(stuck at ${new Date(stuck.stuckAt).toISOString()}, retries: ${stuck.retryCount})`
+        );
+      }
+    }
+
     this.logger.success("Bot stopped.");
     process.exit(0);
   }
@@ -182,22 +194,88 @@ class VultrBot {
       this.logger.info(`SOL balance: ${(solBalance / 1e9).toFixed(4)} SOL`);
     }
 
-    // Check operator registration
-    const isRegistered = await this.executor.isOperatorRegistered();
-    if (!isRegistered) {
-      this.logger.warn(
-        "Operator is not registered with the VULTR pool. " +
-        "You must register as an operator before executing liquidations."
-      );
+    // Check bot authorization with VULTR pool
+    this.logger.info(`Wallet: ${this.wallet.publicKey.toBase58()}`);
+    this.logger.info(`Pool: ${this.config.poolAddress.toBase58()}`);
+
+    // In dry-run mode, skip pool verification if pool doesn't exist
+    if (this.config.dryRun) {
+      let poolExists = false;
+      try {
+        const poolState = await this.executor.getPoolState();
+        poolExists = true;
+
+        // Pool exists, check authorization
+        const isAuthorized = await this.executor.isBotAuthorized();
+        if (!isAuthorized) {
+          this.logger.warn(
+            "[DRY RUN] Bot wallet is NOT authorized for this pool. " +
+            "Continuing in simulation mode..."
+          );
+        } else {
+          this.logger.success("Bot is authorized for VULTR pool");
+        }
+
+        this.state.poolTvl = poolState.totalDeposits;
+        this.logger.info(`Pool TVL: ${formatLargeNumber(poolState.totalDeposits.toNumber() / 1e6)} USDC`);
+        this.logger.info(`Total Profit (all-time): ${formatLargeNumber(poolState.totalProfit.toNumber() / 1e6)} USDC`);
+        this.logger.info(`Total Liquidations: ${poolState.totalLiquidations.toNumber()}`);
+        this.logger.info(
+          `Fee Split: ${poolState.depositorFeeBps / 100}% depositors, ` +
+          `${poolState.stakingFeeBps / 100}% stakers, ` +
+          `${poolState.treasuryFeeBps / 100}% treasury`
+        );
+
+        if (poolState.isPaused) {
+          this.logger.warn("Pool is currently PAUSED. Liquidations will not execute.");
+        }
+      } catch {
+        // Pool doesn't exist - that's fine for dry-run mode
+      }
+
+      if (!poolExists) {
+        this.logger.warn(
+          "[DRY RUN] Pool not found on-chain. " +
+          "Skipping pool verification for simulation mode..."
+        );
+        this.logger.info("[DRY RUN] Using mock data for simulation");
+      }
     } else {
-      this.logger.info("Operator is registered with VULTR pool");
+      // Production mode - require valid pool
+      const isAuthorized = await this.executor.isBotAuthorized();
+      if (!isAuthorized) {
+        this.logger.error(
+          "Bot wallet is NOT authorized for this pool. " +
+          "The bot wallet must match pool.bot_wallet on-chain. " +
+          "Contact the pool admin to update the bot_wallet."
+        );
+        throw new Error("Bot not authorized for pool");
+      }
+      this.logger.success("Bot is authorized for VULTR pool");
+
+      // Get pool state
+      const poolState = await this.executor.getPoolState();
+
+      if (poolState.isPaused) {
+        this.logger.warn("Pool is currently PAUSED. Liquidations will not execute.");
+      }
+
+      this.state.poolTvl = poolState.totalDeposits;
+      this.logger.info(`Pool TVL: ${formatLargeNumber(poolState.totalDeposits.toNumber() / 1e6)} USDC`);
+      this.logger.info(`Total Profit (all-time): ${formatLargeNumber(poolState.totalProfit.toNumber() / 1e6)} USDC`);
+      this.logger.info(`Total Liquidations: ${poolState.totalLiquidations.toNumber()}`);
+      this.logger.info(
+        `Fee Split: ${poolState.depositorFeeBps / 100}% depositors, ` +
+        `${poolState.stakingFeeBps / 100}% stakers, ` +
+        `${poolState.treasuryFeeBps / 100}% treasury`
+      );
     }
 
-    // Get operator token balance
-    const tokenBalance = await this.executor.getOperatorBalance();
-    this.state.operatorBalance = tokenBalance;
+    // Get bot's USDC balance
+    const usdcBalance = await this.executor.getBotUsdcBalance();
+    this.state.operatorBalance = usdcBalance;
     this.logger.info(
-      `Token balance: ${formatLargeNumber(tokenBalance.toNumber() / 1e6)} USDC`
+      `Bot USDC balance: ${formatLargeNumber(usdcBalance.toNumber() / 1e6)} USDC`
     );
 
     // Check connection
@@ -216,6 +294,15 @@ class VultrBot {
     if (!this.isRunning) return;
 
     try {
+      // Check pool status (skip in dry-run mode if pool doesn't exist)
+      if (!this.config.dryRun) {
+        const poolState = await this.executor.getPoolState();
+        if (poolState.isPaused) {
+          this.logger.debug("Pool is paused, skipping iteration");
+          return;
+        }
+      }
+
       // Fetch liquidatable positions
       const positions = await this.fetchPositions();
 
@@ -386,7 +473,8 @@ Options:
   --dry-run       Run in simulation mode (no real transactions)
 
 Environment Variables:
-  WALLET_PATH         Path to operator wallet keypair (required)
+  WALLET_PATH         Path to bot wallet keypair (required)
+  POOL_ADDRESS        VULTR Pool PDA address (required)
   RPC_URL             Solana RPC endpoint
   WS_URL              WebSocket endpoint
   VULTR_PROGRAM_ID    VULTR program address
@@ -398,6 +486,12 @@ Environment Variables:
   JITO_TIP_LAMPORTS   Jito tip amount
   DRY_RUN             Simulation mode (true/false)
   LOG_LEVEL           Log verbosity (debug/info/warn/error)
+
+Setup:
+  1. Deploy VULTR pool contract
+  2. Set pool.bot_wallet to match your bot wallet
+  3. Configure POOL_ADDRESS in .env
+  4. Run the bot
 
 Examples:
   # Start with default settings

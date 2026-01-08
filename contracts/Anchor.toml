@@ -6,17 +6,17 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-vultr = "2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm"
+vultr = "7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe"
 
 [programs.devnet]
-vultr = "2cTDHuGALYQQQTLai9HLwsvkS7nv6r8JJLgPeMrsRPxm"
+vultr = "7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
 cluster = "Devnet"
-wallet = "~/.config/solana/devnet.json"
+wallet = "/mnt/c/VULTR/vultr/bot/test-wallet.json"
 
 [scripts]
 # NOTE: In some Windows/WSL setups, `npx` may resolve to `npx.cmd` and run in

@@ -17,10 +17,12 @@ export interface BotConfig {
   rpcUrl: string;
   /** WebSocket endpoint for subscriptions */
   wsUrl: string;
-  /** Path to operator wallet keypair file */
+  /** Path to bot wallet keypair file */
   walletPath: string;
   /** VULTR program ID */
   vultrProgramId: PublicKey;
+  /** Pool address (the deployed Pool PDA) */
+  poolAddress: PublicKey;
   /** Deposit mint (e.g., USDC) */
   depositMint: PublicKey;
   /** Minimum profit threshold in basis points (e.g., 50 = 0.5%) */
@@ -285,3 +287,62 @@ export type BotEvent =
  * Event handler function
  */
 export type BotEventHandler = (event: BotEvent) => void;
+
+// =============================================================================
+// VULTR Pool Types
+// =============================================================================
+
+/**
+ * Pool state from on-chain VULTR Pool account
+ */
+export interface PoolState {
+  /** Pool admin (can pause/update settings) */
+  admin: PublicKey;
+  /** Authorized bot wallet (can call record_profit) */
+  botWallet: PublicKey;
+  /** Deposit token mint (e.g., USDC) */
+  depositMint: PublicKey;
+  /** Share token mint (sVLTR) */
+  shareMint: PublicKey;
+  /** Pool vault holding deposits */
+  vault: PublicKey;
+  /** Treasury account (receives 5%) */
+  treasury: PublicKey;
+  /** Staking rewards vault (receives 15%) */
+  stakingRewardsVault: PublicKey;
+  /** Total deposit tokens in vault */
+  totalDeposits: BN;
+  /** Total share tokens minted */
+  totalShares: BN;
+  /** Total profit generated (cumulative) */
+  totalProfit: BN;
+  /** Total liquidations executed */
+  totalLiquidations: BN;
+  /** Depositor fee share (8000 = 80%) */
+  depositorFeeBps: number;
+  /** Staking fee share (1500 = 15%) */
+  stakingFeeBps: number;
+  /** Treasury fee share (500 = 5%) */
+  treasuryFeeBps: number;
+  /** Whether pool is paused */
+  isPaused: boolean;
+  /** Maximum pool size */
+  maxPoolSize: BN;
+}
+
+/**
+ * Stuck collateral tracking (for error recovery)
+ * When Marginfi liquidation succeeds but Jupiter swap fails
+ */
+export interface StuckCollateral {
+  /** Collateral token mint */
+  mint: PublicKey;
+  /** Amount of stuck collateral */
+  amount: BN;
+  /** Timestamp when it got stuck */
+  stuckAt: number;
+  /** Number of retry attempts */
+  retryCount: number;
+  /** Error message from last failure */
+  lastError: string;
+}

@@ -1,14 +1,14 @@
 // =============================================================================
-// State Module
+// State Module - NEW SIMPLIFIED DESIGN
 // =============================================================================
 // This module exports all state account structures used by the VULTR protocol.
-// Each account type is defined in its own file for organization.
+//
+// NOTE: Operator account has been REMOVED. The new design does not have
+// external operators. The team runs the bot internally using bot_wallet.
 // =============================================================================
 
 pub mod depositor;
-pub mod operator;
 pub mod pool;
 
 pub use depositor::*;
-pub use operator::*;
 pub use pool::*;

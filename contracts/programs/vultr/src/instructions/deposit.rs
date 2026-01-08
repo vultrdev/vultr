@@ -158,7 +158,7 @@ pub fn handler_deposit(ctx: Context<DepositToPool>, amount: u64) -> Result<()> {
         .total_deposits
         .checked_add(amount)
         .ok_or(VultrError::MathOverflow)?;
-    require!(new_total <= MAX_POOL_SIZE, VultrError::ExceedsMaxPoolSize);
+    require!(new_total <= pool.max_pool_size, VultrError::ExceedsMaxPoolSize);
 
     msg!("Depositing {} tokens for {} shares", amount, shares_to_mint);
 
