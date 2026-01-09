@@ -150,6 +150,10 @@ pub enum VultrError {
     #[msg("Invalid profit - amount must be greater than zero")]
     InvalidProfit,
 
+    /// Bot's profit_source account doesn't have enough balance
+    #[msg("Insufficient balance in profit source account")]
+    InsufficientProfitBalance,
+
     /// Slippage protection triggered - swap output below minimum
     #[msg("Slippage tolerance exceeded - swap output too low")]
     SlippageExceeded,

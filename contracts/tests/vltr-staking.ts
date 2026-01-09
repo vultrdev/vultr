@@ -10,6 +10,7 @@ import {
 import {
   TOKEN_PROGRAM_ID,
   createMint,
+  createAccount,
   createAssociatedTokenAccount,
   getOrCreateAssociatedTokenAccount,
   mintTo,
@@ -169,21 +170,16 @@ describe("vltr-staking", () => {
     );
 
     // Create reward vault (simulating staking_rewards_vault from main pool)
-    // Using a separate keypair so it's distinct from admin's ATA
-    rewardVaultOwner = Keypair.generate();
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(
-        rewardVaultOwner.publicKey,
-        LAMPORTS_PER_SOL
-      )
-    );
-    const rewardVaultAta = await getOrCreateAssociatedTokenAccount(
+    // Must be owned by admin per security constraints
+    rewardVaultOwner = admin; // Use admin as owner
+    const rewardVaultKeypair = Keypair.generate();
+    rewardVault = await createAccount(
       provider.connection,
       admin,
       usdcMint,
-      rewardVaultOwner.publicKey
+      admin.publicKey, // owner must be admin
+      rewardVaultKeypair
     );
-    rewardVault = rewardVaultAta.address;
 
     // Derive PDAs
     [stakingPool, stakingPoolBump] = PublicKey.findProgramAddressSync(

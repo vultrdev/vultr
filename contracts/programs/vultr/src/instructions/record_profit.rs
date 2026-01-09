@@ -57,7 +57,11 @@ pub struct RecordProfit<'info> {
 
     /// The bot's token account holding the profit to distribute
     /// This is where the liquidation profit sits before distribution
-    #[account(mut)]
+    /// Must be owned by bot_wallet to authorize transfers
+    #[account(
+        mut,
+        constraint = profit_source.owner == bot_wallet.key() @ VultrError::InvalidTokenAccountOwner,
+    )]
     pub profit_source: Account<'info, TokenAccount>,
 
     /// Token program
@@ -78,6 +82,12 @@ pub fn handler_record_profit(ctx: Context<RecordProfit>, profit_amount: u64) -> 
 
     // Validate profit amount
     require!(profit_amount > 0, VultrError::InvalidProfit);
+
+    // Validate profit_source has sufficient balance before any transfers
+    require!(
+        ctx.accounts.profit_source.amount >= profit_amount,
+        VultrError::InsufficientProfitBalance
+    );
 
     // Calculate fee distribution
     let (depositor_share, staking_share, treasury_share) =

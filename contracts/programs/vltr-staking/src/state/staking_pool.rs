@@ -84,6 +84,13 @@ impl StakingPool {
             .checked_div(self.total_staked as u128)
             .ok_or(StakingError::DivisionByZero)?;
 
+        // Ensure reward_increase is non-zero to prevent reward loss from rounding
+        // This protects against dust distributions that would round to 0
+        require!(
+            reward_increase > 0,
+            StakingError::InvalidAmount
+        );
+
         self.reward_per_token = self
             .reward_per_token
             .checked_add(reward_increase)

@@ -58,12 +58,13 @@ pub struct Claim<'info> {
     #[account(
         mut,
         constraint = reward_vault.key() == staking_pool.reward_vault @ StakingError::InvalidPDA,
-        token::mint = reward_mint
+        token::mint = reward_mint,
+        constraint = reward_vault.owner == reward_vault_authority.key() @ StakingError::InvalidTokenAccountOwner
     )]
     pub reward_vault: Account<'info, TokenAccount>,
 
     /// Authority that can sign for the reward vault transfers
-    /// This should be the main pool admin or a designated authority
+    /// Must be the owner of the reward_vault
     pub reward_vault_authority: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
@@ -82,7 +83,7 @@ pub fn handler_claim(ctx: Context<Claim>) -> Result<()> {
     // Check reward vault has enough balance
     require!(
         ctx.accounts.reward_vault.amount >= pending_rewards,
-        StakingError::InsufficientStake // Reusing error for insufficient funds
+        StakingError::InsufficientRewardBalance
     );
 
     // Transfer USDC from reward vault to user

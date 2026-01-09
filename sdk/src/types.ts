@@ -15,48 +15,53 @@ import BN from "bn.js";
 /**
  * Pool account state
  * Stores all configuration and state for a VULTR liquidation pool
+ *
+ * NEW SIMPLIFIED DESIGN:
+ * - No external operators - team runs the bot internally
+ * - bot_wallet field stores the authorized bot address
+ * - staking_rewards_vault receives 15% for VLTR token stakers
  */
 export interface Pool {
   /** Pool admin public key */
   admin: PublicKey;
+  /** Bot wallet authorized to call record_profit */
+  botWallet: PublicKey;
   /** Deposit token mint (e.g., USDC) */
   depositMint: PublicKey;
-  /** Share token mint (VLTR) */
+  /** Share token mint (sVLTR) */
   shareMint: PublicKey;
-  /** Vault holding deposited tokens */
+  /** Vault holding deposited tokens (PDA) */
   vault: PublicKey;
-  /** Vault holding accumulated protocol fees */
-  protocolFeeVault: PublicKey;
+  /** Treasury account for protocol fees (5%) - external account */
+  treasury: PublicKey;
+  /** Staking rewards vault for VLTR stakers (15%) - external account */
+  stakingRewardsVault: PublicKey;
 
-  /** Total deposit tokens in the pool */
+  /** Total deposit tokens in the pool (includes depositor share of profits) */
   totalDeposits: BN;
   /** Total share tokens minted */
   totalShares: BN;
-  /** Total profit generated from liquidations */
+  /** Total profit generated from liquidations (cumulative, for stats) */
   totalProfit: BN;
-  /** Total protocol fees accumulated (in fee vault) */
-  accumulatedProtocolFees: BN;
+  /** Total number of liquidations executed */
+  totalLiquidations: BN;
 
-  /** Protocol fee in basis points (default: 500 = 5%) */
-  protocolFeeBps: number;
-  /** Operator fee in basis points (default: 1500 = 15%) */
-  operatorFeeBps: number;
-  /** Depositor share in basis points (default: 8000 = 80%) */
-  depositorShareBps: number;
+  /** Depositor fee in basis points (default: 8000 = 80%) */
+  depositorFeeBps: number;
+  /** Staking fee in basis points (default: 1500 = 15%) */
+  stakingFeeBps: number;
+  /** Treasury fee in basis points (default: 500 = 5%) */
+  treasuryFeeBps: number;
 
-  /** Number of registered operators */
-  operatorCount: number;
   /** Whether the pool is paused */
   isPaused: boolean;
+  /** Maximum pool size in deposit tokens */
+  maxPoolSize: BN;
 
   /** PDA bumps for efficient derivation */
   bump: number;
   vaultBump: number;
   shareMintBump: number;
-  protocolFeeVaultBump: number;
-
-  /** Operator stake withdrawal cooldown in seconds (0 = immediate after request) */
-  operatorCooldownSeconds: BN;
 }
 
 /**
@@ -88,50 +93,8 @@ export interface Depositor {
   bump: number;
 }
 
-/**
- * Operator status enum
- */
-export enum OperatorStatus {
-  /** Operator is not active (should not happen in practice) */
-  Inactive = 0,
-  /** Operator is active and can execute liquidations */
-  Active = 1,
-  /** Operator is in withdrawal cooldown (future feature) */
-  Withdrawing = 2,
-}
-
-/**
- * Operator account state
- * Tracks a registered liquidation operator
- */
-export interface Operator {
-  /** Pool this operator belongs to */
-  pool: PublicKey;
-  /** Authority (wallet) of the operator */
-  authority: PublicKey;
-
-  /** Amount staked by this operator */
-  stakeAmount: BN;
-  /** Total number of liquidations executed */
-  totalLiquidations: number;
-  /** Total profit generated for the pool */
-  totalProfitGenerated: BN;
-  /** Total fees earned by this operator */
-  totalFeesEarned: BN;
-
-  /** Timestamp of last liquidation */
-  lastLiquidationTimestamp: BN;
-  /** Timestamp when operator registered */
-  registeredAt: BN;
-
-  /** Timestamp when operator requested stake withdrawal (0 if not requested) */
-  withdrawalRequestedAt: BN;
-
-  /** Current operator status */
-  status: OperatorStatus;
-  /** PDA bump */
-  bump: number;
-}
+// Note: Operator accounts removed in simplified design
+// Team runs the bot internally via bot_wallet field
 
 // =============================================================================
 // Instruction Parameter Types
@@ -154,19 +117,11 @@ export interface WithdrawParams {
 }
 
 /**
- * Parameters for the register_operator instruction
+ * Parameters for the record_profit instruction (bot only)
  */
-export interface RegisterOperatorParams {
-  /** Amount to stake (must be >= MIN_OPERATOR_STAKE) */
-  stakeAmount: BN;
-}
-
-/**
- * Parameters for the execute_liquidation instruction
- */
-export interface ExecuteLiquidationParams {
-  /** Profit from the liquidation (mock parameter for testing) */
-  profit: BN;
+export interface RecordProfitParams {
+  /** Total profit amount to distribute */
+  profitAmount: BN;
 }
 
 /**
@@ -181,12 +136,12 @@ export interface PausePoolParams {
  * Parameters for the update_fees instruction
  */
 export interface UpdateFeesParams {
-  /** New protocol fee in basis points */
-  protocolFeeBps: number;
-  /** New operator fee in basis points */
-  operatorFeeBps: number;
-  /** New depositor share in basis points */
-  depositorShareBps: number;
+  /** New depositor fee in basis points (default: 8000 = 80%) */
+  depositorFeeBps: number;
+  /** New staking fee in basis points (default: 1500 = 15%) */
+  stakingFeeBps: number;
+  /** New treasury fee in basis points (default: 500 = 5%) */
+  treasuryFeeBps: number;
 }
 
 // =============================================================================
@@ -221,12 +176,12 @@ export interface WithdrawalCalculation {
  * Fee distribution breakdown
  */
 export interface FeeDistribution {
-  /** Amount going to protocol fee vault */
-  protocolFee: BN;
-  /** Amount going to operator */
-  operatorFee: BN;
-  /** Amount staying in pool for depositors */
-  depositorProfit: BN;
+  /** Amount going to depositors (added to vault, increases share price) */
+  depositorShare: BN;
+  /** Amount going to staking rewards vault (for VLTR stakers) */
+  stakingShare: BN;
+  /** Amount going to treasury */
+  treasuryShare: BN;
   /** Total profit being distributed */
   totalProfit: BN;
 }
@@ -239,12 +194,12 @@ export interface PoolStats {
   tvl: BN;
   /** Total shares outstanding */
   totalShares: BN;
-  /** Current share price */
+  /** Current share price (scaled by 1e6) */
   sharePrice: BN;
-  /** Total profit generated */
+  /** Total profit generated (cumulative) */
   totalProfit: BN;
-  /** Number of active operators */
-  operatorCount: number;
+  /** Total number of liquidations */
+  totalLiquidations: BN;
   /** APY estimate (requires historical data) */
   estimatedApy?: number;
 }

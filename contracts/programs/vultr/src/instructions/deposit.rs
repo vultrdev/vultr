@@ -123,7 +123,8 @@ pub struct DepositToPool<'info> {
 /// # Arguments
 /// * `ctx` - The instruction context with all accounts
 /// * `amount` - Amount of deposit tokens to deposit (in base units)
-pub fn handler_deposit(ctx: Context<DepositToPool>, amount: u64) -> Result<()> {
+/// * `min_shares_out` - Minimum shares to receive (slippage protection, 0 to skip)
+pub fn handler_deposit(ctx: Context<DepositToPool>, amount: u64, min_shares_out: u64) -> Result<()> {
     // =========================================================================
     // Input Validation
     // =========================================================================
@@ -144,14 +145,46 @@ pub fn handler_deposit(ctx: Context<DepositToPool>, amount: u64) -> Result<()> {
     );
 
     // =========================================================================
-    // Calculate Shares to Mint
+    // First Deposit Protection (Share Price Inflation Attack Prevention)
     // =========================================================================
 
     let pool = &ctx.accounts.pool;
+
+    // If this is the first deposit (pool is empty), require larger minimum
+    // This prevents the share price inflation attack where:
+    // 1. Attacker deposits 1 token, gets 1 share
+    // 2. Attacker transfers many tokens directly to vault (not through deposit)
+    // 3. Share price becomes inflated, next depositor gets ~0 shares
+    if pool.total_shares == 0 {
+        require!(
+            amount >= MIN_FIRST_DEPOSIT,
+            VultrError::BelowMinimumDeposit
+        );
+        msg!("First deposit - requiring minimum of {} tokens", MIN_FIRST_DEPOSIT);
+    }
+
+    // =========================================================================
+    // Calculate Shares to Mint
+    // =========================================================================
+
     let shares_to_mint = pool.calculate_shares_to_mint(amount)?;
 
-    // Ensure we're minting at least 1 share (prevent dust deposits)
-    require!(shares_to_mint > 0, VultrError::ShareAmountZero);
+    // Ensure we're minting at least MIN_SHARES_MINTED (prevent rounding attacks)
+    // This protects against attacks where share price is manipulated such that
+    // deposit_amount / share_price rounds down to 0 or very small number
+    require!(
+        shares_to_mint >= MIN_SHARES_MINTED,
+        VultrError::ShareAmountZero
+    );
+
+    // Slippage protection: ensure user receives at least min_shares_out
+    // This protects against share price changes between tx submission and execution
+    if min_shares_out > 0 {
+        require!(
+            shares_to_mint >= min_shares_out,
+            VultrError::SlippageExceeded
+        );
+    }
 
     // Check pool size limit
     let new_total = pool

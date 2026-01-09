@@ -68,22 +68,24 @@ pub mod vultr {
     ///
     /// # Arguments
     /// * `amount` - Amount of deposit tokens to deposit (in base units)
+    /// * `min_shares_out` - Minimum shares to receive (slippage protection, 0 to skip)
     ///
     /// # Returns
     /// * Minted shares based on current share price
-    pub fn deposit(ctx: Context<DepositToPool>, amount: u64) -> Result<()> {
-        instructions::deposit::handler_deposit(ctx, amount)
+    pub fn deposit(ctx: Context<DepositToPool>, amount: u64, min_shares_out: u64) -> Result<()> {
+        instructions::deposit::handler_deposit(ctx, amount, min_shares_out)
     }
 
     /// Withdraw tokens by burning shares
     ///
     /// # Arguments
     /// * `shares_to_burn` - Number of share tokens to burn
+    /// * `min_amount_out` - Minimum tokens to receive (slippage protection, 0 to skip)
     ///
     /// # Returns
     /// * Deposit tokens based on current share price (includes profits!)
-    pub fn withdraw(ctx: Context<Withdraw>, shares_to_burn: u64) -> Result<()> {
-        instructions::withdraw::handler_withdraw(ctx, shares_to_burn)
+    pub fn withdraw(ctx: Context<Withdraw>, shares_to_burn: u64, min_amount_out: u64) -> Result<()> {
+        instructions::withdraw::handler_withdraw(ctx, shares_to_burn, min_amount_out)
     }
 
     // =========================================================================

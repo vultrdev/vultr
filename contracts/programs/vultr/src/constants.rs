@@ -77,6 +77,18 @@ pub const MAX_DEPOSIT_AMOUNT: u64 = 100_000_000_000_000;
 /// Prevents dust deposits that waste compute
 pub const MIN_DEPOSIT_AMOUNT: u64 = 1_000_000;
 
+/// Minimum FIRST deposit amount (1000 USDC = 1000 * 10^6)
+/// Prevents share price inflation attacks where attacker:
+/// 1. Deposits 1 token, gets 1 share
+/// 2. Transfers tokens directly to vault
+/// 3. Inflates share price, causing next depositor to get ~0 shares
+/// By requiring a large first deposit, this attack becomes economically unviable
+pub const MIN_FIRST_DEPOSIT: u64 = 1_000_000_000; // 1000 USDC
+
+/// Minimum shares that must be minted for any deposit
+/// Prevents rounding attacks where deposit_amount / share_price rounds to 0
+pub const MIN_SHARES_MINTED: u64 = 1000; // At least 1000 base units (0.001 shares)
+
 /// Default initial pool size cap (500K USDC = 500,000 * 10^6)
 /// Ensures high capital efficiency and APY at launch
 /// Admin can raise this via update_pool_cap as TVL grows

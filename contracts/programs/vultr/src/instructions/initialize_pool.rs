@@ -77,17 +77,19 @@ pub struct InitializePool<'info> {
 
     /// The treasury account for protocol fees (5%)
     /// This is an EXTERNAL token account, not a PDA
-    /// Admin should create this beforehand
+    /// Admin should create this beforehand and must own it
     #[account(
         constraint = treasury.mint == deposit_mint.key() @ crate::error::VultrError::InvalidDepositMint,
+        constraint = treasury.owner == admin.key() @ crate::error::VultrError::InvalidTokenAccountOwner,
     )]
     pub treasury: Account<'info, TokenAccount>,
 
     /// The staking rewards vault for VLTR stakers (15%)
     /// This is an EXTERNAL token account, not a PDA
-    /// Admin should create this beforehand
+    /// Admin should create this beforehand and must own it
     #[account(
         constraint = staking_rewards_vault.mint == deposit_mint.key() @ crate::error::VultrError::InvalidDepositMint,
+        constraint = staking_rewards_vault.owner == admin.key() @ crate::error::VultrError::InvalidTokenAccountOwner,
     )]
     pub staking_rewards_vault: Account<'info, TokenAccount>,
 

@@ -52,9 +52,10 @@ pub struct Initialize<'info> {
 
     /// External reward vault (staking_rewards_vault from main VULTR pool)
     /// This is where 15% of liquidation profits accumulate
-    /// We just store the reference, rewards are distributed from here
+    /// Must be owned by admin to ensure proper control
     #[account(
-        token::mint = reward_mint
+        token::mint = reward_mint,
+        constraint = reward_vault.owner == admin.key() @ crate::error::StakingError::InvalidTokenAccountOwner
     )]
     pub reward_vault: Account<'info, TokenAccount>,
 

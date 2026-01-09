@@ -25,6 +25,9 @@ pub enum StakingError {
     #[msg("No rewards available to claim")]
     NoRewardsToClaim,
 
+    #[msg("Insufficient balance in reward vault")]
+    InsufficientRewardBalance,
+
     // Authorization Errors (6020-6029)
     #[msg("Unauthorized: admin only")]
     Unauthorized,

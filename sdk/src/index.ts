@@ -31,13 +31,10 @@ export {
   // Account types
   Pool,
   Depositor,
-  Operator,
-  OperatorStatus,
   // Instruction params
   DepositParams,
   WithdrawParams,
-  RegisterOperatorParams,
-  ExecuteLiquidationParams,
+  RecordProfitParams,
   PausePoolParams,
   UpdateFeesParams,
   // Result types
@@ -54,9 +51,7 @@ export {
   findPoolPda,
   findVaultPda,
   findShareMintPda,
-  findProtocolFeeVaultPda,
   findDepositorPda,
-  findOperatorPda,
   findAllPoolPdas,
   pdaExists,
 } from "./pda";
@@ -68,16 +63,13 @@ export {
   VAULT_SEED,
   SHARE_MINT_SEED,
   DEPOSITOR_SEED,
-  OPERATOR_SEED,
-  PROTOCOL_FEE_VAULT_SEED,
-  PROTOCOL_FEE_BPS,
-  OPERATOR_FEE_BPS,
-  DEPOSITOR_SHARE_BPS,
+  DEPOSITOR_FEE_BPS,
+  STAKING_FEE_BPS,
+  TREASURY_FEE_BPS,
   BPS_DENOMINATOR,
   MIN_DEPOSIT_AMOUNT,
   MAX_DEPOSIT_AMOUNT,
   MAX_POOL_SIZE,
-  MIN_OPERATOR_STAKE,
   SHARE_DECIMALS,
   USDC_MINT_MAINNET,
   USDC_MINT_DEVNET,
@@ -102,7 +94,6 @@ export {
   // Validation
   validateFeeConfig,
   isValidDepositAmount,
-  isValidOperatorStake,
   // Time
   timestampToDate,
   formatRelativeTime,

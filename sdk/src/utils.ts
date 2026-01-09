@@ -286,17 +286,17 @@ export function formatApy(apy: number): string {
 /**
  * Validate fee configuration sums to 100%
  *
- * @param protocolFeeBps - Protocol fee in basis points
- * @param operatorFeeBps - Operator fee in basis points
- * @param depositorShareBps - Depositor share in basis points
+ * @param depositorFeeBps - Depositor fee in basis points (default: 8000 = 80%)
+ * @param stakingFeeBps - Staking fee in basis points (default: 1500 = 15%)
+ * @param treasuryFeeBps - Treasury fee in basis points (default: 500 = 5%)
  * @returns true if valid
  */
 export function validateFeeConfig(
-  protocolFeeBps: number,
-  operatorFeeBps: number,
-  depositorShareBps: number
+  depositorFeeBps: number,
+  stakingFeeBps: number,
+  treasuryFeeBps: number
 ): boolean {
-  return protocolFeeBps + operatorFeeBps + depositorShareBps === BPS_DENOMINATOR;
+  return depositorFeeBps + stakingFeeBps + treasuryFeeBps === BPS_DENOMINATOR;
 }
 
 /**
@@ -311,20 +311,6 @@ export function isValidDepositAmount(
   minDeposit: BN = new BN(1_000_000)
 ): boolean {
   return amount.gte(minDeposit);
-}
-
-/**
- * Check if an amount meets minimum operator stake
- *
- * @param amount - Stake amount
- * @param minStake - Minimum stake (default: 10,000 USDC = 10_000_000_000)
- * @returns true if valid
- */
-export function isValidOperatorStake(
-  amount: BN,
-  minStake: BN = new BN(10_000_000_000)
-): boolean {
-  return amount.gte(minStake);
 }
 
 // =============================================================================
@@ -377,24 +363,26 @@ export function formatRelativeTime(timestamp: BN): string {
  */
 export function logPoolState(pool: {
   admin: PublicKey;
+  botWallet: PublicKey;
   totalDeposits: BN;
   totalShares: BN;
   totalProfit: BN;
-  operatorCount: number;
+  totalLiquidations: BN;
   isPaused: boolean;
-  protocolFeeBps: number;
-  operatorFeeBps: number;
-  depositorShareBps: number;
+  depositorFeeBps: number;
+  stakingFeeBps: number;
+  treasuryFeeBps: number;
 }): void {
   console.log("=== Pool State ===");
   console.log(`Admin: ${pool.admin.toBase58()}`);
+  console.log(`Bot Wallet: ${pool.botWallet.toBase58()}`);
   console.log(`Total Deposits (TVL): ${formatTokenAmount(pool.totalDeposits)}`);
   console.log(`Total Shares: ${formatTokenAmount(pool.totalShares, SHARE_DECIMALS)}`);
   console.log(`Lifetime Profit (stats): ${formatTokenAmount(pool.totalProfit)}`);
+  console.log(`Total Liquidations: ${pool.totalLiquidations.toString()}`);
   // Note: totalDeposits already includes depositor profits, so pass 0 for totalProfit
   console.log(`Share Price: ${formatSharePrice(calculateSharePrice(pool.totalDeposits, new BN(0), pool.totalShares))}`);
-  console.log(`Operator Count: ${pool.operatorCount}`);
   console.log(`Is Paused: ${pool.isPaused}`);
-  console.log(`Fees: Protocol ${formatBps(pool.protocolFeeBps)}, Operator ${formatBps(pool.operatorFeeBps)}, Depositor ${formatBps(pool.depositorShareBps)}`);
+  console.log(`Fees: Depositor ${formatBps(pool.depositorFeeBps)}, Staking ${formatBps(pool.stakingFeeBps)}, Treasury ${formatBps(pool.treasuryFeeBps)}`);
   console.log("==================");
 }

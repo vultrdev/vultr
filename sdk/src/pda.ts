@@ -12,8 +12,6 @@ import {
   VAULT_SEED,
   SHARE_MINT_SEED,
   DEPOSITOR_SEED,
-  OPERATOR_SEED,
-  PROTOCOL_FEE_VAULT_SEED,
 } from "./constants";
 
 // =============================================================================
@@ -103,28 +101,8 @@ export function findShareMintPda(
   return { address, bump };
 }
 
-/**
- * Derive the Protocol Fee Vault PDA for a given pool
- *
- * @param pool - The pool PDA
- * @param programId - Optional program ID (defaults to VULTR_PROGRAM_ID)
- * @returns PDA address and bump
- *
- * @example
- * ```typescript
- * const { address: feeVaultPda } = findProtocolFeeVaultPda(poolPda);
- * ```
- */
-export function findProtocolFeeVaultPda(
-  pool: PublicKey,
-  programId: PublicKey = VULTR_PROGRAM_ID
-): PdaResult {
-  const [address, bump] = PublicKey.findProgramAddressSync(
-    [PROTOCOL_FEE_VAULT_SEED, pool.toBuffer()],
-    programId
-  );
-  return { address, bump };
-}
+// Note: Protocol fee vault is now an external treasury account, not a PDA
+// Treasury and staking_rewards_vault are passed as external accounts during pool init
 
 // =============================================================================
 // User PDAs
@@ -155,30 +133,7 @@ export function findDepositorPda(
   return { address, bump };
 }
 
-/**
- * Derive the Operator PDA for an operator in a pool
- *
- * @param pool - The pool PDA
- * @param authority - The operator's wallet public key
- * @param programId - Optional program ID (defaults to VULTR_PROGRAM_ID)
- * @returns PDA address and bump
- *
- * @example
- * ```typescript
- * const { address: operatorPda } = findOperatorPda(poolPda, wallet.publicKey);
- * ```
- */
-export function findOperatorPda(
-  pool: PublicKey,
-  authority: PublicKey,
-  programId: PublicKey = VULTR_PROGRAM_ID
-): PdaResult {
-  const [address, bump] = PublicKey.findProgramAddressSync(
-    [OPERATOR_SEED, pool.toBuffer(), authority.toBuffer()],
-    programId
-  );
-  return { address, bump };
-}
+// Note: Operator PDAs removed in simplified design - team runs bot internally
 
 // =============================================================================
 // Convenience Functions
@@ -186,6 +141,9 @@ export function findOperatorPda(
 
 /**
  * Derive all pool-related PDAs at once
+ *
+ * Note: Treasury and staking_rewards_vault are external accounts, not PDAs.
+ * They must be created separately and passed during pool initialization.
  *
  * @param depositMint - The deposit token mint
  * @param programId - Optional program ID (defaults to VULTR_PROGRAM_ID)
@@ -204,18 +162,15 @@ export function findAllPoolPdas(
   pool: PdaResult;
   vault: PdaResult;
   shareMint: PdaResult;
-  protocolFeeVault: PdaResult;
 } {
   const pool = findPoolPda(depositMint, programId);
   const vault = findVaultPda(pool.address, programId);
   const shareMint = findShareMintPda(pool.address, programId);
-  const protocolFeeVault = findProtocolFeeVaultPda(pool.address, programId);
 
   return {
     pool,
     vault,
     shareMint,
-    protocolFeeVault,
   };
 }
 

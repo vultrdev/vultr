@@ -129,9 +129,10 @@ export class StakingClient {
       const distributeIx = new TransactionInstruction({
         programId: this.programId,
         keys: [
-          { pubkey: this.wallet.publicKey, isSigner: true, isWritable: true }, // admin/authority
+          { pubkey: this.wallet.publicKey, isSigner: true, isWritable: true }, // authority
           { pubkey: stakingPoolPda, isSigner: false, isWritable: true }, // staking_pool
-          { pubkey: sourceTokenAccount, isSigner: false, isWritable: true }, // source (staking_rewards_vault)
+          { pubkey: stakingPool.rewardMint, isSigner: false, isWritable: false }, // reward_mint (USDC)
+          { pubkey: sourceTokenAccount, isSigner: false, isWritable: true }, // reward_source (staking_rewards_vault)
           { pubkey: stakingPool.rewardVault, isSigner: false, isWritable: true }, // reward_vault
           { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token_program
         ],

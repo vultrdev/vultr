@@ -55,6 +55,12 @@ pub fn handler_update_pool_cap(
     // Validation
     // =========================================================================
 
+    // New cap must be greater than zero (prevent division by zero in utilization calc)
+    require!(
+        new_cap > 0,
+        VultrError::InvalidPoolCap
+    );
+
     // New cap cannot exceed global maximum
     require!(
         new_cap <= MAX_POOL_SIZE,

@@ -41,9 +41,11 @@ pub struct Distribute<'info> {
     pub reward_mint: Account<'info, Mint>,
 
     /// Source of rewards (authority's USDC account or staking_rewards_vault)
+    /// Must be owned by authority to authorize transfer
     #[account(
         mut,
-        token::mint = reward_mint
+        token::mint = reward_mint,
+        constraint = reward_source.owner == authority.key() @ StakingError::InvalidTokenAccountOwner
     )]
     pub reward_source: Account<'info, TokenAccount>,
 

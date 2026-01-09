@@ -251,16 +251,27 @@ describe("VULTR Protocol - New Simplified Design", () => {
     treasury = treasuryATA.address;
     console.log("Treasury:", treasury.toBase58());
 
-    // Create staking rewards vault (could be a separate keypair in production)
-    const stakingVaultKeypair = Keypair.generate();
-    await airdropSol(connection, stakingVaultKeypair.publicKey, 1);
+    // Create staking rewards vault (must be owned by admin per security constraints)
+    // In production, admin creates this account before initializing the pool
     const stakingATA = await getOrCreateAssociatedTokenAccount(
       connection,
-      stakingVaultKeypair,
+      admin,
       depositMint,
-      stakingVaultKeypair.publicKey
+      admin.publicKey,
+      false,
+      undefined,
+      undefined,
+      TOKEN_PROGRAM_ID
     );
-    stakingRewardsVault = stakingATA.address;
+    // Use a separate token account for staking rewards (not the same as treasury)
+    const stakingVaultKeypair = Keypair.generate();
+    stakingRewardsVault = await createAccount(
+      connection,
+      admin,
+      depositMint,
+      admin.publicKey, // owner must be admin
+      stakingVaultKeypair
+    );
     console.log("Staking Rewards Vault:", stakingRewardsVault.toBase58());
 
     // Create bot's profit source account
@@ -432,7 +443,7 @@ describe("VULTR Protocol - New Simplified Design", () => {
       );
 
       const tx = await program.methods
-        .deposit(depositAmount)
+        .deposit(depositAmount, new BN(0))
         .accounts({
           depositor: user1.publicKey,
           pool: poolPDA,
@@ -515,7 +526,7 @@ describe("VULTR Protocol - New Simplified Design", () => {
       const poolBefore = await program.account.pool.fetch(poolPDA);
 
       const tx = await program.methods
-        .deposit(depositAmount)
+        .deposit(depositAmount, new BN(0))
         .accounts({
           depositor: user2.publicKey,
           pool: poolPDA,
@@ -565,7 +576,7 @@ describe("VULTR Protocol - New Simplified Design", () => {
 
       try {
         await program.methods
-          .deposit(depositAmount)
+          .deposit(depositAmount, new BN(0))
           .accounts({
             depositor: user1.publicKey,
             pool: poolPDA,
@@ -755,7 +766,7 @@ describe("VULTR Protocol - New Simplified Design", () => {
         .div(pool.totalShares);
 
       const tx = await program.methods
-        .withdraw(sharesToBurn)
+        .withdraw(sharesToBurn, new BN(0))
         .accounts({
           withdrawer: user1.publicKey,
           pool: poolPDA,
@@ -806,7 +817,7 @@ describe("VULTR Protocol - New Simplified Design", () => {
 
       try {
         await program.methods
-          .withdraw(new BN(0))
+          .withdraw(new BN(0), new BN(0))
           .accounts({
             withdrawer: user1.publicKey,
             pool: poolPDA,
@@ -862,7 +873,7 @@ describe("VULTR Protocol - New Simplified Design", () => {
 
       try {
         await program.methods
-          .deposit(depositAmount)
+          .deposit(depositAmount, new BN(0))
           .accounts({
             depositor: user1.publicKey,
             pool: poolPDA,
@@ -1048,7 +1059,7 @@ describe("VULTR Protocol - New Simplified Design", () => {
       const depositCountBefore = depositorBefore.depositCount;
 
       await program.methods
-        .deposit(depositAmount)
+        .deposit(depositAmount, new BN(0))
         .accounts({
           depositor: user1.publicKey,
           pool: poolPDA,

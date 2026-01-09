@@ -21,6 +21,7 @@ import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
   getAccount,
+  TokenAccountNotFoundError,
 } from "@solana/spl-token";
 import { Program, AnchorProvider, Wallet, BN, Idl } from "@coral-xyz/anchor";
 
@@ -28,8 +29,6 @@ import { VULTR_PROGRAM_ID, BPS_DENOMINATOR } from "./constants";
 import {
   Pool,
   Depositor,
-  Operator,
-  OperatorStatus,
   ShareCalculation,
   WithdrawalCalculation,
   FeeDistribution,
@@ -40,9 +39,7 @@ import {
   findPoolPda,
   findVaultPda,
   findShareMintPda,
-  findProtocolFeeVaultPda,
   findDepositorPda,
-  findOperatorPda,
   findAllPoolPdas,
 } from "./pda";
 
@@ -51,7 +48,7 @@ import {
 // =============================================================================
 
 // Note: In production, you would import the generated IDL from target/types
-// For now, we define a minimal interface
+// For now, we define a minimal interface matching the simplified contract
 interface VultrProgram {
   methods: {
     initializePool(): {
@@ -60,37 +57,19 @@ interface VultrProgram {
         instruction: () => Promise<TransactionInstruction>;
       };
     };
-    deposit(amount: BN): {
+    deposit(amount: BN, minSharesOut: BN): {
       accounts: (accounts: Record<string, PublicKey>) => {
         rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
         instruction: () => Promise<TransactionInstruction>;
       };
     };
-    withdraw(sharesToBurn: BN): {
+    withdraw(sharesToBurn: BN, minAmountOut: BN): {
       accounts: (accounts: Record<string, PublicKey>) => {
         rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
         instruction: () => Promise<TransactionInstruction>;
       };
     };
-    registerOperator(stakeAmount: BN): {
-      accounts: (accounts: Record<string, PublicKey>) => {
-        rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
-        instruction: () => Promise<TransactionInstruction>;
-      };
-    };
-    deregisterOperator(): {
-      accounts: (accounts: Record<string, PublicKey>) => {
-        rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
-        instruction: () => Promise<TransactionInstruction>;
-      };
-    };
-    requestOperatorWithdrawal(): {
-      accounts: (accounts: Record<string, PublicKey>) => {
-        rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
-        instruction: () => Promise<TransactionInstruction>;
-      };
-    };
-    executeLiquidation(profit: BN): {
+    recordProfit(amount: BN): {
       accounts: (accounts: Record<string, PublicKey>) => {
         rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
         instruction: () => Promise<TransactionInstruction>;
@@ -102,23 +81,29 @@ interface VultrProgram {
         instruction: () => Promise<TransactionInstruction>;
       };
     };
+    resumePool(): {
+      accounts: (accounts: Record<string, PublicKey>) => {
+        rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
+        instruction: () => Promise<TransactionInstruction>;
+      };
+    };
     updateFees(
-      protocolFeeBps: number,
-      operatorFeeBps: number,
-      depositorShareBps: number
+      depositorFeeBps: number,
+      stakingFeeBps: number,
+      treasuryFeeBps: number
     ): {
       accounts: (accounts: Record<string, PublicKey>) => {
         rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
         instruction: () => Promise<TransactionInstruction>;
       };
     };
-    updateOperatorCooldown(cooldownSeconds: BN): {
+    updatePoolCap(newCap: BN): {
       accounts: (accounts: Record<string, PublicKey>) => {
         rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
         instruction: () => Promise<TransactionInstruction>;
       };
     };
-    withdrawProtocolFees(): {
+    updateBotWallet(): {
       accounts: (accounts: Record<string, PublicKey>) => {
         rpc: (opts?: ConfirmOptions) => Promise<TransactionSignature>;
         instruction: () => Promise<TransactionInstruction>;
@@ -139,10 +124,6 @@ interface VultrProgram {
     depositor: {
       fetch: (address: PublicKey) => Promise<Depositor>;
       fetchNullable: (address: PublicKey) => Promise<Depositor | null>;
-    };
-    operator: {
-      fetch: (address: PublicKey) => Promise<Operator>;
-      fetchNullable: (address: PublicKey) => Promise<Operator | null>;
     };
   };
 }
@@ -285,13 +266,6 @@ export class VultrClient {
     return findDepositorPda(pool, owner, this.programId).address;
   }
 
-  /**
-   * Get operator PDA for a user
-   */
-  public getOperatorPda(pool: PublicKey, authority: PublicKey): PublicKey {
-    return findOperatorPda(pool, authority, this.programId).address;
-  }
-
   // ===========================================================================
   // Account Fetching
   // ===========================================================================
@@ -314,13 +288,18 @@ export class VultrClient {
     try {
       const program = this.getProgram();
       return await program.account.pool.fetchNullable(poolPda);
-    } catch {
-      // If program not initialized, fetch raw account
-      const accountInfo = await this.connection.getAccountInfo(poolPda);
-      if (!accountInfo) return null;
-      // Would need to manually deserialize - for now return null
-      console.warn("Pool account exists but program not initialized for deserialization");
-      return null;
+    } catch (error) {
+      // Check if it's a "program not initialized" error
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("not initialized") || errorMessage.includes("Program not initialized")) {
+        // If program not initialized, check if account exists
+        const accountInfo = await this.connection.getAccountInfo(poolPda);
+        if (!accountInfo) return null;
+        console.warn("Pool account exists but program not initialized for deserialization");
+        return null;
+      }
+      // Re-throw unexpected errors
+      throw new Error(`Failed to fetch pool: ${errorMessage}`);
     }
   }
 
@@ -339,28 +318,18 @@ export class VultrClient {
     try {
       const program = this.getProgram();
       return await program.account.depositor.fetchNullable(depositorPda);
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Fetch operator account data
-   *
-   * @param pool - Pool PDA
-   * @param authority - Operator wallet
-   * @returns Operator account data or null if not found
-   */
-  public async getOperator(
-    pool: PublicKey,
-    authority: PublicKey
-  ): Promise<Operator | null> {
-    const operatorPda = this.getOperatorPda(pool, authority);
-    try {
-      const program = this.getProgram();
-      return await program.account.operator.fetchNullable(operatorPda);
-    } catch {
-      return null;
+    } catch (error) {
+      // Check if it's an "account not found" type error (expected for new users)
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (
+        errorMessage.includes("Account does not exist") ||
+        errorMessage.includes("not initialized") ||
+        errorMessage.includes("could not find")
+      ) {
+        return null;
+      }
+      // Re-throw unexpected errors
+      throw new Error(`Failed to fetch depositor: ${errorMessage}`);
     }
   }
 
@@ -427,6 +396,15 @@ export class VultrClient {
   ): WithdrawalCalculation {
     const totalShares = pool.totalShares;
 
+    // Handle empty pool case - prevent division by zero
+    if (totalShares.isZero()) {
+      return {
+        withdrawalAmount: new BN(0),
+        sharePrice: new BN(1_000_000), // 1.0 scaled
+        exchangeRate: "1:1 (pool is empty)",
+      };
+    }
+
     // Total pool value = total_deposits (which already includes depositor profits)
     // Do NOT add totalProfit here - it would double count!
     const totalValue = pool.totalDeposits;
@@ -454,22 +432,23 @@ export class VultrClient {
    * @returns Fee distribution breakdown
    */
   public calculateFeeDistribution(pool: Pool, profit: BN): FeeDistribution {
-    const protocolFee = profit
-      .mul(new BN(pool.protocolFeeBps))
+    // Depositor share (80% default)
+    const depositorShare = profit
+      .mul(new BN(pool.depositorFeeBps))
       .div(new BN(BPS_DENOMINATOR));
 
-    const operatorFee = profit
-      .mul(new BN(pool.operatorFeeBps))
+    // Staking share (15% default)
+    const stakingShare = profit
+      .mul(new BN(pool.stakingFeeBps))
       .div(new BN(BPS_DENOMINATOR));
 
-    const depositorProfit = profit
-      .mul(new BN(pool.depositorShareBps))
-      .div(new BN(BPS_DENOMINATOR));
+    // Treasury gets remainder to avoid rounding errors
+    const treasuryShare = profit.sub(depositorShare).sub(stakingShare);
 
     return {
-      protocolFee,
-      operatorFee,
-      depositorProfit,
+      depositorShare,
+      stakingShare,
+      treasuryShare,
       totalProfit: profit,
     };
   }
@@ -498,7 +477,7 @@ export class VultrClient {
       totalShares: pool.totalShares,
       sharePrice,
       totalProfit: pool.totalProfit,
-      operatorCount: pool.operatorCount,
+      totalLiquidations: pool.totalLiquidations,
     };
   }
 
@@ -529,8 +508,16 @@ export class VultrClient {
       const shareAta = await getAssociatedTokenAddress(shareMint, user);
       const shareAccount = await getAccount(this.connection, shareAta);
       shares = new BN(shareAccount.amount.toString());
-    } catch {
-      // No share account
+    } catch (error) {
+      // Only ignore "account not found" errors - user hasn't deposited yet
+      if (!(error instanceof TokenAccountNotFoundError)) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        // Also ignore "could not find" type errors
+        if (!errorMessage.includes("could not find")) {
+          throw new Error(`Failed to fetch share balance: ${errorMessage}`);
+        }
+      }
+      // No share account - user hasn't deposited, shares stays at 0
     }
 
     // Calculate current value
@@ -565,10 +552,16 @@ export class VultrClient {
    * Build initialize pool transaction
    *
    * @param depositMint - The deposit token mint
+   * @param botWallet - The bot wallet authorized to call record_profit
+   * @param treasury - External token account for treasury fees (5%)
+   * @param stakingRewardsVault - External token account for staking rewards (15%)
    * @returns Transaction signature
    */
   public async initializePool(
-    depositMint: PublicKey
+    depositMint: PublicKey,
+    botWallet: PublicKey,
+    treasury: PublicKey,
+    stakingRewardsVault: PublicKey
   ): Promise<TransactionSignature> {
     if (!this.wallet) throw new Error("Wallet required");
 
@@ -579,11 +572,13 @@ export class VultrClient {
       .initializePool()
       .accounts({
         admin: this.wallet.publicKey,
+        botWallet,
         pool: pdas.pool.address,
         depositMint,
         shareMint: pdas.shareMint.address,
         vault: pdas.vault.address,
-        protocolFeeVault: pdas.protocolFeeVault.address,
+        treasury,
+        stakingRewardsVault,
         systemProgram: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
@@ -595,11 +590,13 @@ export class VultrClient {
    *
    * @param depositMint - The deposit token mint
    * @param amount - Amount to deposit (in base units)
+   * @param minSharesOut - Minimum shares to receive (slippage protection, 0 to skip)
    * @returns Transaction signature
    */
   public async deposit(
     depositMint: PublicKey,
-    amount: BN
+    amount: BN,
+    minSharesOut: BN = new BN(0)
   ): Promise<TransactionSignature> {
     if (!this.wallet) throw new Error("Wallet required");
 
@@ -624,18 +621,25 @@ export class VultrClient {
     const preInstructions: TransactionInstruction[] = [];
     try {
       await getAccount(this.connection, userShareAta);
-    } catch {
-      preInstructions.push(
-        createAssociatedTokenAccountInstruction(
-          this.wallet.publicKey,
-          userShareAta,
-          this.wallet.publicKey,
-          pdas.shareMint.address
-        )
-      );
+    } catch (error) {
+      // Only create ATA if account doesn't exist
+      if (error instanceof TokenAccountNotFoundError) {
+        preInstructions.push(
+          createAssociatedTokenAccountInstruction(
+            this.wallet.publicKey,
+            userShareAta,
+            this.wallet.publicKey,
+            pdas.shareMint.address
+          )
+        );
+      } else {
+        // Re-throw unexpected errors
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to check share account: ${errorMessage}`);
+      }
     }
 
-    const builder = program.methods.deposit(amount).accounts({
+    const builder = program.methods.deposit(amount, minSharesOut).accounts({
       depositor: this.wallet.publicKey,
       pool: pdas.pool.address,
       depositorAccount: depositorPda,
@@ -667,11 +671,13 @@ export class VultrClient {
    *
    * @param depositMint - The deposit token mint
    * @param sharesToBurn - Number of shares to burn
+   * @param minAmountOut - Minimum tokens to receive (slippage protection, 0 to skip)
    * @returns Transaction signature
    */
   public async withdraw(
     depositMint: PublicKey,
-    sharesToBurn: BN
+    sharesToBurn: BN,
+    minAmountOut: BN = new BN(0)
   ): Promise<TransactionSignature> {
     if (!this.wallet) throw new Error("Wallet required");
 
@@ -693,7 +699,7 @@ export class VultrClient {
     );
 
     return await program.methods
-      .withdraw(sharesToBurn)
+      .withdraw(sharesToBurn, minAmountOut)
       .accounts({
         withdrawer: this.wallet.publicKey,
         pool: pdas.pool.address,
@@ -708,151 +714,9 @@ export class VultrClient {
       .rpc(this.confirmOptions);
   }
 
-  /**
-   * Build register operator transaction
-   *
-   * @param depositMint - The deposit token mint
-   * @param stakeAmount - Amount to stake
-   * @returns Transaction signature
-   */
-  public async registerOperator(
-    depositMint: PublicKey,
-    stakeAmount: BN
-  ): Promise<TransactionSignature> {
-    if (!this.wallet) throw new Error("Wallet required");
-
-    const program = this.getProgram();
-    const pdas = this.getAllPoolPdas(depositMint);
-    const operatorPda = this.getOperatorPda(
-      pdas.pool.address,
-      this.wallet.publicKey
-    );
-
-    const operatorDepositAta = await getAssociatedTokenAddress(
-      depositMint,
-      this.wallet.publicKey
-    );
-
-    return await program.methods
-      .registerOperator(stakeAmount)
-      .accounts({
-        authority: this.wallet.publicKey,
-        pool: pdas.pool.address,
-        operator: operatorPda,
-        depositMint,
-        operatorDepositAccount: operatorDepositAta,
-        vault: pdas.vault.address,
-        systemProgram: SystemProgram.programId,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc(this.confirmOptions);
-  }
-
-  /**
-   * Build deregister operator transaction
-   *
-   * @param depositMint - The deposit token mint
-   * @returns Transaction signature
-   */
-  public async deregisterOperator(
-    depositMint: PublicKey
-  ): Promise<TransactionSignature> {
-    if (!this.wallet) throw new Error("Wallet required");
-
-    const program = this.getProgram();
-    const pdas = this.getAllPoolPdas(depositMint);
-    const operatorPda = this.getOperatorPda(
-      pdas.pool.address,
-      this.wallet.publicKey
-    );
-
-    const operatorDepositAta = await getAssociatedTokenAddress(
-      depositMint,
-      this.wallet.publicKey
-    );
-
-    return await program.methods
-      .deregisterOperator()
-      .accounts({
-        authority: this.wallet.publicKey,
-        pool: pdas.pool.address,
-        operator: operatorPda,
-        depositMint,
-        operatorDepositAccount: operatorDepositAta,
-        vault: pdas.vault.address,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc(this.confirmOptions);
-  }
-
-  /**
-   * Build execute liquidation transaction
-   *
-   * @param depositMint - The deposit token mint
-   * @param profit - Profit from liquidation (mock parameter)
-   * @returns Transaction signature
-   */
-  public async executeLiquidation(
-    depositMint: PublicKey,
-    profit: BN
-  ): Promise<TransactionSignature> {
-    if (!this.wallet) throw new Error("Wallet required");
-
-    const program = this.getProgram();
-    const pdas = this.getAllPoolPdas(depositMint);
-    const operatorPda = this.getOperatorPda(
-      pdas.pool.address,
-      this.wallet.publicKey
-    );
-
-    const operatorTokenAta = await getAssociatedTokenAddress(
-      depositMint,
-      this.wallet.publicKey
-    );
-
-    return await program.methods
-      .executeLiquidation(profit)
-      .accounts({
-        operatorAuthority: this.wallet.publicKey,
-        pool: pdas.pool.address,
-        operator: operatorPda,
-        depositMint,
-        vault: pdas.vault.address,
-        protocolFeeVault: pdas.protocolFeeVault.address,
-        operatorTokenAccount: operatorTokenAta,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc(this.confirmOptions);
-  }
-
   // ===========================================================================
   // Admin Methods
   // ===========================================================================
-
-  /**
-   * Request operator withdrawal (starts cooldown)
-   *
-   * @param depositMint - The deposit token mint
-   * @returns Transaction signature
-   */
-  public async requestOperatorWithdrawal(
-    depositMint: PublicKey
-  ): Promise<TransactionSignature> {
-    if (!this.wallet) throw new Error("Wallet required");
-
-    const program = this.getProgram();
-    const poolPda = this.getPoolPda(depositMint);
-    const operatorPda = this.getOperatorPda(poolPda, this.wallet.publicKey);
-
-    return await program.methods
-      .requestOperatorWithdrawal()
-      .accounts({
-        authority: this.wallet.publicKey,
-        pool: poolPda,
-        operator: operatorPda,
-      })
-      .rpc(this.confirmOptions);
-  }
 
   /**
    * Pause or unpause a pool (admin only)
@@ -883,16 +747,16 @@ export class VultrClient {
    * Update pool fees (admin only)
    *
    * @param depositMint - The deposit token mint
-   * @param protocolFeeBps - New protocol fee in basis points
-   * @param operatorFeeBps - New operator fee in basis points
-   * @param depositorShareBps - New depositor share in basis points
+   * @param depositorFeeBps - New depositor fee in basis points (default: 8000 = 80%)
+   * @param stakingFeeBps - New staking fee in basis points (default: 1500 = 15%)
+   * @param treasuryFeeBps - New treasury fee in basis points (default: 500 = 5%)
    * @returns Transaction signature
    */
   public async updateFees(
     depositMint: PublicKey,
-    protocolFeeBps: number,
-    operatorFeeBps: number,
-    depositorShareBps: number
+    depositorFeeBps: number,
+    stakingFeeBps: number,
+    treasuryFeeBps: number
   ): Promise<TransactionSignature> {
     if (!this.wallet) throw new Error("Wallet required");
 
@@ -900,7 +764,7 @@ export class VultrClient {
     const poolPda = this.getPoolPda(depositMint);
 
     return await program.methods
-      .updateFees(protocolFeeBps, operatorFeeBps, depositorShareBps)
+      .updateFees(depositorFeeBps, stakingFeeBps, treasuryFeeBps)
       .accounts({
         admin: this.wallet.publicKey,
         pool: poolPda,
@@ -909,56 +773,52 @@ export class VultrClient {
   }
 
   /**
-   * Update operator cooldown (admin only)
+   * Update pool cap (admin only)
    *
    * @param depositMint - The deposit token mint
-   * @param cooldownSeconds - Cooldown in seconds (0 = immediate after request)
-   */
-  public async updateOperatorCooldown(
-    depositMint: PublicKey,
-    cooldownSeconds: BN
-  ): Promise<TransactionSignature> {
-    if (!this.wallet) throw new Error("Wallet required");
-
-    const program = this.getProgram();
-    const poolPda = this.getPoolPda(depositMint);
-
-    return await program.methods
-      .updateOperatorCooldown(cooldownSeconds)
-      .accounts({
-        admin: this.wallet.publicKey,
-        pool: poolPda,
-      })
-      .rpc(this.confirmOptions);
-  }
-
-  /**
-   * Withdraw protocol fees (admin only)
-   *
-   * @param depositMint - The deposit token mint
+   * @param newCap - New maximum pool size
    * @returns Transaction signature
    */
-  public async withdrawProtocolFees(
-    depositMint: PublicKey
+  public async updatePoolCap(
+    depositMint: PublicKey,
+    newCap: BN
   ): Promise<TransactionSignature> {
     if (!this.wallet) throw new Error("Wallet required");
 
     const program = this.getProgram();
-    const pdas = this.getAllPoolPdas(depositMint);
-
-    const adminTokenAta = await getAssociatedTokenAddress(
-      depositMint,
-      this.wallet.publicKey
-    );
+    const poolPda = this.getPoolPda(depositMint);
 
     return await program.methods
-      .withdrawProtocolFees()
+      .updatePoolCap(newCap)
       .accounts({
         admin: this.wallet.publicKey,
-        pool: pdas.pool.address,
-        protocolFeeVault: pdas.protocolFeeVault.address,
-        adminTokenAccount: adminTokenAta,
-        tokenProgram: TOKEN_PROGRAM_ID,
+        pool: poolPda,
+      })
+      .rpc(this.confirmOptions);
+  }
+
+  /**
+   * Update bot wallet (admin only)
+   *
+   * @param depositMint - The deposit token mint
+   * @param newBotWallet - New bot wallet public key
+   * @returns Transaction signature
+   */
+  public async updateBotWallet(
+    depositMint: PublicKey,
+    newBotWallet: PublicKey
+  ): Promise<TransactionSignature> {
+    if (!this.wallet) throw new Error("Wallet required");
+
+    const program = this.getProgram();
+    const poolPda = this.getPoolPda(depositMint);
+
+    return await program.methods
+      .updateBotWallet()
+      .accounts({
+        admin: this.wallet.publicKey,
+        pool: poolPda,
+        newBotWallet,
       })
       .rpc(this.confirmOptions);
   }

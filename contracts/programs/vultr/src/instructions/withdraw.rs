@@ -116,7 +116,8 @@ pub struct Withdraw<'info> {
 /// # Arguments
 /// * `ctx` - The instruction context with all accounts
 /// * `shares_to_burn` - Number of share tokens to burn
-pub fn handler_withdraw(ctx: Context<Withdraw>, shares_to_burn: u64) -> Result<()> {
+/// * `min_amount_out` - Minimum tokens to receive (slippage protection, 0 to skip)
+pub fn handler_withdraw(ctx: Context<Withdraw>, shares_to_burn: u64, min_amount_out: u64) -> Result<()> {
     // =========================================================================
     // Input Validation
     // =========================================================================
@@ -148,6 +149,15 @@ pub fn handler_withdraw(ctx: Context<Withdraw>, shares_to_burn: u64) -> Result<(
         ctx.accounts.vault.amount >= withdrawal_amount,
         VultrError::InsufficientBalance
     );
+
+    // Slippage protection: ensure user receives at least min_amount_out
+    // This protects against share price changes between tx submission and execution
+    if min_amount_out > 0 {
+        require!(
+            withdrawal_amount >= min_amount_out,
+            VultrError::SlippageExceeded
+        );
+    }
 
     msg!(
         "Withdrawing {} tokens for {} shares",
