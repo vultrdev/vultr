@@ -14,8 +14,8 @@ const SYSTEM_PROGRAM_ID = new PublicKey("11111111111111111111111111111111");
 const COMPUTE_BUDGET_PROGRAM = new PublicKey("ComputeBudget111111111111111111111111111111");
 const ASSOCIATED_TOKEN_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
-// Malicious program IDs for testing
-const MALICIOUS_PROGRAM = new PublicKey("MaLiC10uS1111111111111111111111111111111111");
+// Malicious program IDs for testing (generated keypairs)
+const MALICIOUS_PROGRAM = Keypair.generate().publicKey;
 const UNKNOWN_PROGRAM = Keypair.generate().publicKey;
 
 // Replicate the validation logic from executor.ts
@@ -234,7 +234,7 @@ describe("Jupiter Transaction Validation (FIX-3)", () => {
       tx.add(createMockInstruction(TOKEN_PROGRAM_ID)); // Looks normal
       tx.add(createMockInstruction(JUPITER_PROGRAM_ID)); // Looks normal
       // Attacker injects malicious program that drains wallet
-      tx.add(createMockInstruction(new PublicKey("DrA1N111111111111111111111111111111111111111")));
+      tx.add(createMockInstruction(Keypair.generate().publicKey));
 
       expect(() => validateJupiterTransaction(tx)).toThrow(
         /Unexpected program in Jupiter tx/
