@@ -42,13 +42,18 @@ import {
   LIQUIDATION_RETRY_CONFIG,
   TX_CONFIRM_RETRY_CONFIG,
 } from "./retry";
+import { CircuitBreaker, CircuitBreakerConfig, CircuitState } from "./circuitBreaker";
+import { AlertMonitor, loadAlertConfigFromEnv } from "./monitor";
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-// Jito tip accounts (one of these must receive the tip)
-const JITO_TIP_ACCOUNTS = [
+// =============================================================================
+// SECURITY FIX-17: Jito Tip Accounts with Dynamic Fetch + Fallback
+// =============================================================================
+// Fallback tip accounts in case dynamic fetch fails
+const JITO_TIP_ACCOUNTS_FALLBACK = [
   "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
   "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
   "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
@@ -58,6 +63,55 @@ const JITO_TIP_ACCOUNTS = [
   "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
   "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
 ].map((s) => new PublicKey(s));
+
+// Cache for dynamically fetched tip accounts
+let cachedJitoTipAccounts: PublicKey[] | null = null;
+let lastJitoFetchTime = 0;
+const JITO_CACHE_TTL_MS = 3600000; // 1 hour
+
+/**
+ * Fetch Jito tip accounts dynamically from their API
+ * Falls back to hardcoded accounts if fetch fails
+ */
+async function getJitoTipAccounts(): Promise<PublicKey[]> {
+  const now = Date.now();
+
+  // Return cached accounts if still valid
+  if (cachedJitoTipAccounts && now - lastJitoFetchTime < JITO_CACHE_TTL_MS) {
+    return cachedJitoTipAccounts;
+  }
+
+  try {
+    // Jito provides tip accounts via their block engine API
+    const response = await fetch("https://mainnet.block-engine.jito.wtf/api/v1/bundles/tip_accounts", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(5000), // 5 second timeout
+    });
+
+    if (!response.ok) {
+      throw new Error(`Jito API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Validate response format
+    if (Array.isArray(data) && data.length > 0 && typeof data[0] === "string") {
+      cachedJitoTipAccounts = data.map((s: string) => new PublicKey(s));
+      lastJitoFetchTime = now;
+      console.log(`[JitoTip] Fetched ${cachedJitoTipAccounts.length} tip accounts from API`);
+      return cachedJitoTipAccounts;
+    }
+
+    throw new Error("Invalid response format from Jito API");
+  } catch (error) {
+    console.warn(`[JitoTip] Failed to fetch tip accounts: ${error}. Using fallback.`);
+    return JITO_TIP_ACCOUNTS_FALLBACK;
+  }
+}
+
+// Initialize with fallback for immediate use
+let JITO_TIP_ACCOUNTS = JITO_TIP_ACCOUNTS_FALLBACK;
 
 // Marginfi Program ID
 const MARGINFI_PROGRAM_ID = new PublicKey(
@@ -78,6 +132,35 @@ const JUPITER_SWAP_RETRY_CONFIG = {
 };
 
 // =============================================================================
+// SECURITY FIX-9: Dynamic Marginfi Discriminator
+// =============================================================================
+// Anchor instruction discriminators are computed as the first 8 bytes of:
+// sha256("global:<instruction_name>")
+// This is more maintainable than hardcoding the bytes.
+// =============================================================================
+
+import { createHash } from "crypto";
+
+/**
+ * Compute Anchor instruction discriminator from instruction name
+ * Uses sha256("global:<instruction_name>").slice(0, 8)
+ */
+function computeAnchorDiscriminator(instructionName: string): Buffer {
+  const preimage = `global:${instructionName}`;
+  const hash = createHash("sha256").update(preimage).digest();
+  return hash.slice(0, 8);
+}
+
+// Pre-compute Marginfi discriminators for efficiency
+// These will auto-update if Marginfi changes their instruction names
+const MARGINFI_DISCRIMINATORS = {
+  liquidate: computeAnchorDiscriminator("liquidate"),
+  // Add others as needed:
+  // lendingAccountDeposit: computeAnchorDiscriminator("lending_account_deposit"),
+  // lendingAccountWithdraw: computeAnchorDiscriminator("lending_account_withdraw"),
+};
+
+// =============================================================================
 // Liquidation Executor
 // =============================================================================
 
@@ -94,6 +177,12 @@ export class LiquidationExecutor {
   private recordProfitBuilder: RecordProfitBuilder;
   private stakingClient: StakingClient | null;
   private rateLimiter: RateLimiter;
+
+  // SECURITY FIX-8: Circuit breaker for failure protection
+  private circuitBreaker: CircuitBreaker;
+
+  // SECURITY FIX-18: Alert monitor for external notifications
+  private alertMonitor: AlertMonitor;
 
   // Track stuck collateral for manual recovery
   private stuckCollateral: StuckCollateral[] = [];
@@ -133,6 +222,38 @@ export class LiquidationExecutor {
     } else {
       this.stakingClient = null;
     }
+
+    // SECURITY FIX-8: Initialize circuit breaker
+    this.circuitBreaker = new CircuitBreaker(this.logger, {
+      maxConsecutiveFailures: 5,
+      resetTimeoutMs: 300000, // 5 minutes
+      dailyLossLimitUsd: 1000,
+      enabled: true,
+    });
+    this.logger.info("Circuit breaker initialized");
+
+    // SECURITY FIX-18: Initialize alert monitor
+    this.alertMonitor = new AlertMonitor(loadAlertConfigFromEnv(), this.logger);
+    if (this.alertMonitor.isEnabled()) {
+      this.logger.info("Alert monitor enabled");
+    }
+
+    // SECURITY FIX-17: Initialize Jito tip accounts (async, non-blocking)
+    this.initJitoTipAccounts();
+  }
+
+  /**
+   * Initialize Jito tip accounts asynchronously
+   * This refreshes the cached tip accounts from Jito's API
+   */
+  private async initJitoTipAccounts(): Promise<void> {
+    try {
+      const accounts = await getJitoTipAccounts();
+      JITO_TIP_ACCOUNTS = accounts;
+      this.logger.info(`Jito tip accounts initialized: ${accounts.length} accounts`);
+    } catch (error) {
+      this.logger.warn("Failed to fetch Jito tip accounts, using fallback");
+    }
   }
 
   // ===========================================================================
@@ -156,6 +277,21 @@ export class LiquidationExecutor {
     this.logger.info(
       `Executing liquidation for ${opportunity.position.accountAddress.toBase58().slice(0, 8)}...`
     );
+
+    // SECURITY FIX-8: Check circuit breaker before executing
+    if (!this.circuitBreaker.canExecute()) {
+      const stats = this.circuitBreaker.getStats();
+      this.logger.error(
+        `Circuit breaker is ${stats.state} - skipping liquidation. ` +
+        `Consecutive failures: ${stats.consecutiveFailures}, Daily loss: $${stats.dailyLossTotal}`
+      );
+      return {
+        success: false,
+        error: `Circuit breaker is OPEN - ${stats.consecutiveFailures} consecutive failures`,
+        executionTimeMs: Date.now() - startTime,
+        opportunity,
+      };
+    }
 
     // Check if dry run
     if (this.config.dryRun) {
@@ -271,6 +407,9 @@ export class LiquidationExecutor {
 
       this.logger.success(`✅ Liquidation successful!`);
 
+      // SECURITY FIX-8: Record success in circuit breaker
+      this.circuitBreaker.recordSuccess();
+
       // Update state
       this.state.liquidationsSuccessful++;
       this.state.totalProfit = this.state.totalProfit.add(profit);
@@ -290,6 +429,11 @@ export class LiquidationExecutor {
 
       this.logger.error(`Liquidation failed: ${errorMessage}`);
 
+      // SECURITY FIX-8: Record failure in circuit breaker
+      // Estimate potential loss as gas cost in USD (rough estimate)
+      const estimatedLossUsd = (opportunity.estimatedGasCost || 0) / 1_000_000;
+      this.circuitBreaker.recordFailure(errorMessage, estimatedLossUsd);
+
       return {
         success: false,
         error: errorMessage,
@@ -299,6 +443,20 @@ export class LiquidationExecutor {
     } finally {
       this.state.liquidationsAttempted++;
     }
+  }
+
+  /**
+   * Get circuit breaker status
+   */
+  getCircuitBreakerStats() {
+    return this.circuitBreaker.getStats();
+  }
+
+  /**
+   * Force circuit breaker closed (manual override)
+   */
+  forceCircuitBreakerClose() {
+    this.circuitBreaker.forceClose();
   }
 
   // ===========================================================================
@@ -361,8 +519,8 @@ export class LiquidationExecutor {
     );
 
     // Build liquidate instruction data
-    // Discriminator for liquidate = [0xdf, 0x15, 0x8c, 0xb5, 0x6b, 0x4f, 0x8b, 0x99]
-    const discriminator = Buffer.from([223, 21, 140, 181, 107, 79, 139, 153]);
+    // SECURITY FIX-9: Use dynamically computed discriminator instead of hardcoded bytes
+    const discriminator = MARGINFI_DISCRIMINATORS.liquidate;
     const amountBuffer = Buffer.alloc(8);
     assetAmount.toArrayLike(Buffer, "le", 8).copy(amountBuffer);
     const instructionData = Buffer.concat([discriminator, amountBuffer]);
@@ -481,6 +639,9 @@ export class LiquidationExecutor {
       const swapTransactionBuf = Buffer.from(swapResult.swapTransaction, "base64");
       const transaction = Transaction.from(swapTransactionBuf);
 
+      // SECURITY FIX-3: Validate transaction before signing
+      this.validateJupiterTransaction(transaction);
+
       // Sign with bot wallet
       transaction.sign(this.wallet);
 
@@ -504,6 +665,75 @@ export class LiquidationExecutor {
       this.logger.error("Jupiter swap failed", error);
       throw error;
     }
+  }
+
+  // ===========================================================================
+  // SECURITY FIX-3: Jupiter Transaction Validation
+  // ===========================================================================
+
+  /**
+   * Validate a Jupiter swap transaction before signing
+   *
+   * This prevents signing malicious transactions if Jupiter API is compromised
+   * or MITM'd. Only allows known safe programs.
+   *
+   * @param transaction - The transaction to validate
+   * @throws Error if transaction contains unexpected programs
+   */
+  private validateJupiterTransaction(transaction: Transaction): void {
+    // Allowlist of programs that Jupiter swaps legitimately use
+    const ALLOWED_PROGRAMS = new Set([
+      JUPITER_PROGRAM_ID.toBase58(),
+      TOKEN_PROGRAM_ID.toBase58(),
+      "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL", // Associated Token Program
+      "ComputeBudget111111111111111111111111111111", // Compute Budget
+      "11111111111111111111111111111111", // System Program
+      // Common Jupiter route programs
+      "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc", // Orca Whirlpool
+      "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", // Raydium CPMM
+      "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium AMM
+      "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
+      "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB", // Meteora Pools
+      "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY", // Phoenix
+      "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX", // Serum/OpenBook
+      "opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb", // OpenBook v2
+    ]);
+
+    let totalSystemTransferLamports = 0n;
+
+    for (const ix of transaction.instructions) {
+      const programId = ix.programId.toBase58();
+
+      // Check if program is in allowlist
+      if (!ALLOWED_PROGRAMS.has(programId)) {
+        this.logger.error(`SECURITY: Unexpected program in Jupiter tx: ${programId}`);
+        throw new Error(
+          `SECURITY: Refusing to sign transaction with unexpected program: ${programId}. ` +
+          `This may indicate a compromised Jupiter API response.`
+        );
+      }
+
+      // Track SOL transfers via System Program
+      if (programId === "11111111111111111111111111111111") {
+        // System Program transfer instruction has discriminator 2 and lamports at offset 4
+        if (ix.data.length >= 12 && ix.data[0] === 2) {
+          const lamports = ix.data.readBigUInt64LE(4);
+          totalSystemTransferLamports += lamports;
+        }
+      }
+    }
+
+    // Warn if large SOL transfers detected (> 0.1 SOL)
+    const MAX_EXPECTED_SOL_LAMPORTS = 100_000_000n; // 0.1 SOL
+    if (totalSystemTransferLamports > MAX_EXPECTED_SOL_LAMPORTS) {
+      this.logger.warn(
+        `SECURITY WARNING: Large SOL transfer in Jupiter tx: ${totalSystemTransferLamports} lamports (${Number(totalSystemTransferLamports) / 1_000_000_000} SOL)`
+      );
+    }
+
+    this.logger.debug(
+      `Jupiter tx validated: ${transaction.instructions.length} instructions from ${new Set(transaction.instructions.map(ix => ix.programId.toBase58())).size} programs`
+    );
   }
 
   // ===========================================================================

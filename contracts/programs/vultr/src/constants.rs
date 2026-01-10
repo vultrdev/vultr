@@ -97,3 +97,19 @@ pub const DEFAULT_POOL_SIZE: u64 = 500_000_000_000;
 /// Maximum allowed pool size cap (1B USDC = 1,000,000,000 * 10^6)
 /// Hard limit - even admin cannot set pool cap above this
 pub const MAX_POOL_SIZE: u64 = 1_000_000_000_000_000;
+
+// =============================================================================
+// SECURITY: TIMELOCK CONFIGURATION (FIX-4, FIX-5, FIX-6, FIX-7)
+// =============================================================================
+
+/// Timelock for admin operations (24 hours in seconds)
+/// Admin/bot wallet changes and fee changes must wait this long after proposal
+pub const ADMIN_TIMELOCK_SECONDS: i64 = 86400; // 24 hours
+
+/// Emergency withdrawal timelock (7 days in seconds)
+/// Users can emergency withdraw after pool has been paused this long
+pub const EMERGENCY_TIMELOCK_SECONDS: i64 = 604800; // 7 days
+
+/// Maximum time a pending change can stay pending before expiring (7 days)
+/// If not finalized within this time, the proposal expires and must be re-submitted
+pub const PENDING_CHANGE_EXPIRY_SECONDS: i64 = 604800; // 7 days

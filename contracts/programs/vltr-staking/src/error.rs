@@ -28,6 +28,9 @@ pub enum StakingError {
     #[msg("Insufficient balance in reward vault")]
     InsufficientRewardBalance,
 
+    #[msg("Reward amount exceeds maximum per distribution")]
+    RewardExceedsMax,
+
     // Authorization Errors (6020-6029)
     #[msg("Unauthorized: admin only")]
     Unauthorized,

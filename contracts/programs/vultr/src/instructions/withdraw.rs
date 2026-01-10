@@ -249,3 +249,200 @@ pub fn handler_withdraw(ctx: Context<Withdraw>, shares_to_burn: u64, min_amount_
 
     Ok(())
 }
+
+// =============================================================================
+// SECURITY FIX-6: Emergency Withdrawal
+// =============================================================================
+// Allows users to withdraw their funds if the pool has been paused for > 7 days.
+// This prevents admins from indefinitely locking user funds.
+// =============================================================================
+
+/// Accounts required for emergency_withdraw instruction
+#[derive(Accounts)]
+pub struct EmergencyWithdraw<'info> {
+    // =========================================================================
+    // Signers
+    // =========================================================================
+
+    /// The user withdrawing tokens
+    /// Must sign to authorize share burning
+    #[account(mut)]
+    pub withdrawer: Signer<'info>,
+
+    // =========================================================================
+    // Pool Accounts
+    // =========================================================================
+
+    /// The pool to withdraw from (must be paused for > 7 days)
+    #[account(
+        mut,
+        seeds = [POOL_SEED, pool.deposit_mint.as_ref()],
+        bump = pool.bump,
+        // Note: We check is_paused and pause_timestamp in the handler
+    )]
+    pub pool: Account<'info, Pool>,
+
+    /// The withdrawer's depositor state account
+    #[account(
+        mut,
+        seeds = [DEPOSITOR_SEED, pool.key().as_ref(), withdrawer.key().as_ref()],
+        bump = depositor_account.bump,
+        constraint = depositor_account.owner == withdrawer.key() @ VultrError::Unauthorized
+    )]
+    pub depositor_account: Account<'info, Depositor>,
+
+    // =========================================================================
+    // Token Mints
+    // =========================================================================
+
+    /// The deposit token mint (e.g., USDC)
+    #[account(
+        constraint = deposit_mint.key() == pool.deposit_mint @ VultrError::InvalidDepositMint
+    )]
+    pub deposit_mint: Account<'info, Mint>,
+
+    /// The share token mint (VLTR)
+    /// Program will burn shares from user
+    #[account(
+        mut,
+        seeds = [SHARE_MINT_SEED, pool.key().as_ref()],
+        bump = pool.share_mint_bump
+    )]
+    pub share_mint: Account<'info, Mint>,
+
+    // =========================================================================
+    // Token Accounts
+    // =========================================================================
+
+    /// User's deposit token account (destination for withdrawn tokens)
+    #[account(
+        mut,
+        constraint = user_deposit_account.mint == deposit_mint.key() @ VultrError::InvalidDepositMint,
+        constraint = user_deposit_account.owner == withdrawer.key() @ VultrError::InvalidTokenAccountOwner
+    )]
+    pub user_deposit_account: Account<'info, TokenAccount>,
+
+    /// User's share token account (source of shares to burn)
+    #[account(
+        mut,
+        constraint = user_share_account.mint == share_mint.key() @ VultrError::InvalidShareMint,
+        constraint = user_share_account.owner == withdrawer.key() @ VultrError::InvalidTokenAccountOwner
+    )]
+    pub user_share_account: Account<'info, TokenAccount>,
+
+    /// Pool's vault (source of withdrawal tokens)
+    #[account(
+        mut,
+        seeds = [VAULT_SEED, pool.key().as_ref()],
+        bump = pool.vault_bump
+    )]
+    pub vault: Account<'info, TokenAccount>,
+
+    // =========================================================================
+    // Programs
+    // =========================================================================
+
+    pub token_program: Program<'info, Token>,
+}
+
+/// Handler for emergency_withdraw instruction
+///
+/// Allows withdrawal when pool is paused for > 7 days
+///
+/// # Arguments
+/// * `ctx` - The instruction context with all accounts
+/// * `shares_to_burn` - Number of share tokens to burn
+pub fn handler_emergency_withdraw(ctx: Context<EmergencyWithdraw>, shares_to_burn: u64) -> Result<()> {
+    let pool = &ctx.accounts.pool;
+    let clock = Clock::get()?;
+
+    // =========================================================================
+    // SECURITY FIX-6: Validate emergency withdrawal conditions
+    // =========================================================================
+
+    // Pool must be paused
+    require!(pool.is_paused, VultrError::PoolNotPaused);
+
+    // Pool must have been paused for at least 7 days
+    let paused_duration = clock.unix_timestamp - pool.pause_timestamp;
+    require!(
+        paused_duration >= EMERGENCY_TIMELOCK_SECONDS,
+        VultrError::EmergencyTimelockNotExpired
+    );
+
+    msg!("Emergency withdrawal triggered - pool paused for {} seconds (minimum: {})",
+        paused_duration, EMERGENCY_TIMELOCK_SECONDS);
+
+    // =========================================================================
+    // Standard withdrawal logic (same as regular withdraw)
+    // =========================================================================
+
+    require!(shares_to_burn > 0, VultrError::InvalidAmount);
+    require!(
+        ctx.accounts.user_share_account.amount >= shares_to_burn,
+        VultrError::InsufficientShares
+    );
+    require!(
+        ctx.accounts.pool.total_shares >= shares_to_burn,
+        VultrError::InsufficientShares
+    );
+
+    let withdrawal_amount = pool.calculate_withdrawal_amount(shares_to_burn)?;
+
+    require!(
+        ctx.accounts.vault.amount >= withdrawal_amount,
+        VultrError::InsufficientBalance
+    );
+
+    // Burn shares
+    let burn_ctx = CpiContext::new(
+        ctx.accounts.token_program.to_account_info(),
+        Burn {
+            mint: ctx.accounts.share_mint.to_account_info(),
+            from: ctx.accounts.user_share_account.to_account_info(),
+            authority: ctx.accounts.withdrawer.to_account_info(),
+        },
+    );
+    token::burn(burn_ctx, shares_to_burn)?;
+
+    // Transfer tokens from vault to user
+    let deposit_mint_key = ctx.accounts.deposit_mint.key();
+    let pool_seeds = &[
+        POOL_SEED,
+        deposit_mint_key.as_ref(),
+        &[ctx.accounts.pool.bump],
+    ];
+    let signer_seeds = &[&pool_seeds[..]];
+
+    let transfer_ctx = CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        Transfer {
+            from: ctx.accounts.vault.to_account_info(),
+            to: ctx.accounts.user_deposit_account.to_account_info(),
+            authority: ctx.accounts.pool.to_account_info(),
+        },
+        signer_seeds,
+    );
+    token::transfer(transfer_ctx, withdrawal_amount)?;
+
+    // Update pool state
+    let pool = &mut ctx.accounts.pool;
+    pool.total_deposits = pool
+        .total_deposits
+        .checked_sub(withdrawal_amount)
+        .ok_or(VultrError::MathUnderflow)?;
+    pool.total_shares = pool
+        .total_shares
+        .checked_sub(shares_to_burn)
+        .ok_or(VultrError::MathUnderflow)?;
+
+    // Update depositor account
+    let depositor_account = &mut ctx.accounts.depositor_account;
+    depositor_account.record_withdrawal(withdrawal_amount, clock.unix_timestamp)?;
+
+    msg!("EMERGENCY WITHDRAWAL successful!");
+    msg!("Shares burned: {}", shares_to_burn);
+    msg!("Amount withdrawn: {}", withdrawal_amount);
+
+    Ok(())
+}

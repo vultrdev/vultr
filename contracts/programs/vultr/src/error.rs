@@ -169,4 +169,40 @@ pub enum VultrError {
     /// Calculated share amount is zero - deposit too small relative to pool
     #[msg("Share amount rounds to zero")]
     ShareAmountZero,
+
+    // =========================================================================
+    // Timelock Errors (6080-6089) - SECURITY FIXES
+    // =========================================================================
+
+    /// Trying to finalize a change but no change is pending
+    #[msg("No pending change to finalize")]
+    NoPendingChange,
+
+    /// Timelock period has not expired yet - must wait 24 hours
+    #[msg("Timelock not expired - must wait 24 hours after proposal")]
+    TimelockNotExpired,
+
+    /// Timelock for pending change has expired (been too long since proposal)
+    #[msg("Pending change expired - please propose again")]
+    TimelockExpired,
+
+    /// Trying to cancel a change but none is pending
+    #[msg("No pending change to cancel")]
+    NoPendingChangeToCancel,
+
+    // =========================================================================
+    // Emergency Withdrawal Errors (6090-6099)
+    // =========================================================================
+
+    /// Pool is not paused - emergency withdraw only works when paused
+    #[msg("Pool is not paused - emergency withdraw not available")]
+    PoolNotPaused,
+
+    /// Pool hasn't been paused long enough for emergency withdrawal (7 days)
+    #[msg("Emergency timelock not expired - pool must be paused for 7 days")]
+    EmergencyTimelockNotExpired,
+
+    /// Invalid address provided (e.g., zero address)
+    #[msg("Invalid address - cannot be zero address")]
+    InvalidAddress,
 }

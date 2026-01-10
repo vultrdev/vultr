@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::REWARD_PRECISION;
+use crate::constants::{MAX_REWARD_PER_DISTRIBUTION, REWARD_PRECISION};
 use crate::error::StakingError;
 
 /// Global staking pool state
@@ -71,12 +71,20 @@ impl StakingPool {
 
     /// Update reward_per_token when new rewards are distributed
     /// Formula: reward_per_token += (new_rewards * PRECISION) / total_staked
+    ///
+    /// SECURITY FIX-16: Added MAX_REWARD_PER_DISTRIBUTION cap
     pub fn update_reward_per_token(&mut self, new_rewards: u64) -> Result<()> {
         if self.total_staked == 0 {
             // No stakers, rewards cannot be distributed
             // This shouldn't happen if called correctly
             return Ok(());
         }
+
+        // SECURITY FIX-16: Enforce reward distribution cap to prevent overflow
+        require!(
+            new_rewards <= MAX_REWARD_PER_DISTRIBUTION,
+            StakingError::RewardExceedsMax
+        );
 
         let reward_increase = (new_rewards as u128)
             .checked_mul(REWARD_PRECISION)

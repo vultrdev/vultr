@@ -20,3 +20,11 @@ pub const USDC_DECIMALS: u8 = 6;
 pub const MIN_STAKE_AMOUNT: u64 = 1_000_000; // 1 VLTR (6 decimals)
 pub const MAX_STAKE_AMOUNT: u64 = 100_000_000_000_000; // 100M VLTR
 pub const MIN_DISTRIBUTE_AMOUNT: u64 = 1_000; // 0.001 USDC minimum distribution
+
+// =============================================================================
+// SECURITY FIX-16: Reward distribution cap to prevent overflow edge cases
+// =============================================================================
+// Maximum rewards that can be distributed in a single transaction
+// Set to 10M USDC to prevent potential overflow in reward calculations
+// while still allowing for substantial reward distributions
+pub const MAX_REWARD_PER_DISTRIBUTION: u64 = 10_000_000_000_000; // 10M USDC (6 decimals)

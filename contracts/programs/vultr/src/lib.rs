@@ -182,12 +182,79 @@ pub mod vultr {
     }
 
     /// Transfer admin rights to a new address (admin only)
-    ///
-    /// # Warning
-    /// * This is irreversible!
-    /// * Make sure the new admin address is correct
-    /// * Consider using a multisig
+    /// DEPRECATED: Use propose_admin_transfer + finalize_admin_transfer instead
     pub fn transfer_admin(ctx: Context<TransferAdmin>) -> Result<()> {
         instructions::admin::handler_transfer_admin(ctx)
+    }
+
+    // =========================================================================
+    // SECURITY: Timelock Admin Operations (FIX-4, FIX-5, FIX-7)
+    // All sensitive changes require 24-hour delay between propose and finalize
+    // =========================================================================
+
+    /// Propose an admin transfer (24-hour timelock)
+    pub fn propose_admin_transfer(ctx: Context<ProposeAdminTransfer>) -> Result<()> {
+        instructions::admin::handler_propose_admin_transfer(ctx)
+    }
+
+    /// Finalize an admin transfer after 24-hour timelock
+    pub fn finalize_admin_transfer(ctx: Context<FinalizeAdminTransfer>) -> Result<()> {
+        instructions::admin::handler_finalize_admin_transfer(ctx)
+    }
+
+    /// Cancel a pending admin transfer
+    pub fn cancel_admin_transfer(ctx: Context<FinalizeAdminTransfer>) -> Result<()> {
+        instructions::admin::handler_cancel_admin_transfer(ctx)
+    }
+
+    /// Propose a bot wallet update (24-hour timelock)
+    pub fn propose_bot_wallet(ctx: Context<ProposeBotWallet>) -> Result<()> {
+        instructions::admin::handler_propose_bot_wallet(ctx)
+    }
+
+    /// Finalize a bot wallet update after 24-hour timelock
+    pub fn finalize_bot_wallet(ctx: Context<FinalizeBotWallet>) -> Result<()> {
+        instructions::admin::handler_finalize_bot_wallet(ctx)
+    }
+
+    /// Cancel a pending bot wallet update
+    pub fn cancel_bot_wallet(ctx: Context<FinalizeBotWallet>) -> Result<()> {
+        instructions::admin::handler_cancel_bot_wallet(ctx)
+    }
+
+    /// Propose a fee update (24-hour timelock)
+    pub fn propose_fees(
+        ctx: Context<ProposeFees>,
+        depositor_fee_bps: u16,
+        staking_fee_bps: u16,
+        treasury_fee_bps: u16,
+    ) -> Result<()> {
+        instructions::admin::handler_propose_fees(ctx, depositor_fee_bps, staking_fee_bps, treasury_fee_bps)
+    }
+
+    /// Finalize a fee update after 24-hour timelock
+    pub fn finalize_fees(ctx: Context<FinalizeFees>) -> Result<()> {
+        instructions::admin::handler_finalize_fees(ctx)
+    }
+
+    /// Cancel a pending fee update
+    pub fn cancel_fees(ctx: Context<FinalizeFees>) -> Result<()> {
+        instructions::admin::handler_cancel_fees(ctx)
+    }
+
+    // =========================================================================
+    // SECURITY FIX-6: Emergency Withdrawal
+    // =========================================================================
+
+    /// Emergency withdraw when pool has been paused for > 7 days
+    ///
+    /// This allows users to recover their funds if the admin has abandoned
+    /// the protocol or is holding funds hostage.
+    ///
+    /// # Requirements
+    /// * Pool must be paused
+    /// * Pool must have been paused for at least 7 days
+    pub fn emergency_withdraw(ctx: Context<EmergencyWithdraw>, shares_to_burn: u64) -> Result<()> {
+        instructions::withdraw::handler_emergency_withdraw(ctx, shares_to_burn)
     }
 }

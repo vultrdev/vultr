@@ -6,6 +6,9 @@
 // - Network failures
 // - Transaction timeouts
 // - Temporary service outages
+//
+// SECURITY FIX-12: Added idempotency tracking to prevent double-execution
+// SECURITY FIX-19: Increased liquidation retry config
 // =============================================================================
 
 import { Logger } from "./logger";
@@ -72,6 +75,301 @@ export interface RetryResult<T> {
   attempts: number;
   /** Total time spent in milliseconds */
   totalTimeMs: number;
+}
+
+// =============================================================================
+// SECURITY FIX-12: Idempotency Tracking
+// =============================================================================
+// Prevents double-execution of transactions during retries.
+// If a transaction might have succeeded but we got a timeout, tracking
+// prevents us from re-executing and potentially losing funds.
+// =============================================================================
+
+/**
+ * Record of an executed operation for idempotency tracking
+ */
+export interface IdempotencyRecord {
+  /** Unique identifier for the operation */
+  operationId: string;
+  /** Transaction signature if available */
+  signature?: string;
+  /** Timestamp when operation was recorded */
+  timestamp: number;
+  /** Result of the operation */
+  result: "pending" | "success" | "failure";
+  /** Optional metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Idempotency tracker to prevent double-execution of transactions
+ *
+ * SECURITY FIX-12: Tracks executed operation IDs and transaction signatures
+ * to prevent re-execution during retries, especially for timeout errors
+ * where the transaction may have actually succeeded.
+ */
+export class IdempotencyTracker {
+  private records: Map<string, IdempotencyRecord> = new Map();
+  private logger?: Logger;
+  private maxAge: number;
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * @param maxAgeMs - Maximum age for records before cleanup (default: 1 hour)
+   * @param logger - Optional logger
+   */
+  constructor(maxAgeMs: number = 3600000, logger?: Logger) {
+    this.maxAge = maxAgeMs;
+    this.logger = logger;
+
+    // Start periodic cleanup
+    this.cleanupInterval = setInterval(() => this.cleanup(), 300000); // Every 5 minutes
+  }
+
+  /**
+   * Check if an operation has already been executed
+   */
+  hasExecuted(operationId: string): boolean {
+    const record = this.records.get(operationId);
+    if (!record) return false;
+
+    // Check if record has expired
+    if (Date.now() - record.timestamp > this.maxAge) {
+      this.records.delete(operationId);
+      return false;
+    }
+
+    return record.result === "success" || record.result === "pending";
+  }
+
+  /**
+   * Get the record for an operation if it exists
+   */
+  getRecord(operationId: string): IdempotencyRecord | undefined {
+    const record = this.records.get(operationId);
+    if (!record) return undefined;
+
+    // Check if record has expired
+    if (Date.now() - record.timestamp > this.maxAge) {
+      this.records.delete(operationId);
+      return undefined;
+    }
+
+    return record;
+  }
+
+  /**
+   * Mark an operation as pending (about to execute)
+   */
+  markPending(operationId: string, metadata?: Record<string, unknown>): void {
+    if (this.hasExecuted(operationId)) {
+      this.logger?.warn(`Operation ${operationId} already executed, skipping`);
+      return;
+    }
+
+    this.records.set(operationId, {
+      operationId,
+      timestamp: Date.now(),
+      result: "pending",
+      metadata,
+    });
+
+    this.logger?.debug(`Operation ${operationId} marked as pending`);
+  }
+
+  /**
+   * Mark an operation as successful
+   */
+  markSuccess(operationId: string, signature?: string, metadata?: Record<string, unknown>): void {
+    const existing = this.records.get(operationId);
+
+    this.records.set(operationId, {
+      operationId,
+      signature,
+      timestamp: Date.now(),
+      result: "success",
+      metadata: { ...existing?.metadata, ...metadata },
+    });
+
+    this.logger?.debug(`Operation ${operationId} marked as success${signature ? ` (sig: ${signature})` : ""}`);
+  }
+
+  /**
+   * Mark an operation as failed (can be retried)
+   */
+  markFailure(operationId: string, metadata?: Record<string, unknown>): void {
+    const existing = this.records.get(operationId);
+
+    // Only update if not already successful
+    if (existing?.result === "success") {
+      this.logger?.debug(`Operation ${operationId} already succeeded, not marking as failure`);
+      return;
+    }
+
+    this.records.set(operationId, {
+      operationId,
+      timestamp: Date.now(),
+      result: "failure",
+      metadata: { ...existing?.metadata, ...metadata },
+    });
+
+    this.logger?.debug(`Operation ${operationId} marked as failure`);
+  }
+
+  /**
+   * Check if a transaction signature has been recorded
+   */
+  hasSignature(signature: string): boolean {
+    for (const record of this.records.values()) {
+      if (record.signature === signature) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Generate a unique operation ID for a liquidation
+   * Based on account address and timestamp window to prevent duplicates
+   */
+  generateLiquidationId(accountAddress: string, windowMs: number = 5000): string {
+    const timeWindow = Math.floor(Date.now() / windowMs);
+    return `liquidate:${accountAddress}:${timeWindow}`;
+  }
+
+  /**
+   * Generate a unique operation ID for a swap
+   */
+  generateSwapId(inputMint: string, outputMint: string, amount: number): string {
+    const timeWindow = Math.floor(Date.now() / 5000);
+    return `swap:${inputMint}:${outputMint}:${amount}:${timeWindow}`;
+  }
+
+  /**
+   * Clean up expired records
+   */
+  cleanup(): void {
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const [id, record] of this.records.entries()) {
+      if (now - record.timestamp > this.maxAge) {
+        this.records.delete(id);
+        cleaned++;
+      }
+    }
+
+    if (cleaned > 0) {
+      this.logger?.debug(`Idempotency tracker cleaned up ${cleaned} expired records`);
+    }
+  }
+
+  /**
+   * Get statistics about tracked operations
+   */
+  getStats(): { total: number; pending: number; success: number; failure: number } {
+    let pending = 0;
+    let success = 0;
+    let failure = 0;
+
+    for (const record of this.records.values()) {
+      switch (record.result) {
+        case "pending": pending++; break;
+        case "success": success++; break;
+        case "failure": failure++; break;
+      }
+    }
+
+    return { total: this.records.size, pending, success, failure };
+  }
+
+  /**
+   * Stop the cleanup interval
+   */
+  destroy(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+  }
+
+  /**
+   * Clear all records
+   */
+  clear(): void {
+    this.records.clear();
+  }
+}
+
+/**
+ * Execute a function with idempotency check
+ * Returns cached result if operation was already executed
+ */
+export async function executeIdempotent<T>(
+  operationId: string,
+  fn: () => Promise<T>,
+  tracker: IdempotencyTracker,
+  logger?: Logger
+): Promise<T> {
+  // Check if already executed
+  const existing = tracker.getRecord(operationId);
+  if (existing?.result === "success") {
+    logger?.info(`Operation ${operationId} already succeeded, skipping re-execution`);
+    throw new IdempotencyError(`Operation ${operationId} already executed`);
+  }
+
+  // Check if pending (might be in-flight from another call)
+  if (existing?.result === "pending") {
+    logger?.warn(`Operation ${operationId} is pending, waiting...`);
+    // Wait a bit and check again
+    await sleep(1000);
+    const recheckRecord = tracker.getRecord(operationId);
+    if (recheckRecord?.result === "success") {
+      throw new IdempotencyError(`Operation ${operationId} already executed`);
+    }
+  }
+
+  // Mark as pending
+  tracker.markPending(operationId);
+
+  try {
+    const result = await fn();
+    tracker.markSuccess(operationId);
+    return result;
+  } catch (error) {
+    // Only mark as failure if it's retryable
+    // For timeout errors, keep as pending since tx might have succeeded
+    if (isTimeoutError(error as Error)) {
+      logger?.warn(`Operation ${operationId} timed out - keeping as pending (tx may have succeeded)`);
+      // Don't mark as failure - the transaction might have actually succeeded
+    } else {
+      tracker.markFailure(operationId);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Error thrown when operation was already executed
+ */
+export class IdempotencyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IdempotencyError";
+  }
+}
+
+/**
+ * Check if an error is a timeout error (transaction might have succeeded)
+ */
+export function isTimeoutError(error: Error): boolean {
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("etimedout") ||
+    message.includes("blockhash not found") ||
+    message.includes("block height exceeded")
+  );
 }
 
 // =============================================================================
@@ -380,13 +678,16 @@ export const TX_CONFIRM_RETRY_CONFIG: RetryConfig = {
 
 /**
  * Retry configuration optimized for liquidation execution
+ *
+ * SECURITY FIX-19: Increased maxRetries from 2 to 5 for better reliability
+ * while still keeping low backoff for competition sensitivity
  */
 export const LIQUIDATION_RETRY_CONFIG: RetryConfig = {
-  maxRetries: 2, // Don't retry liquidations too much (competition)
-  initialBackoffMs: 500,
+  maxRetries: 5, // Increased from 2 for better reliability
+  initialBackoffMs: 300, // Reduced from 500 for faster retries
   maxBackoffMs: 2000,
-  backoffMultiplier: 2,
-  jitterMs: 200,
+  backoffMultiplier: 1.5, // Reduced from 2 for quicker escalation
+  jitterMs: 150, // Reduced from 200
 };
 
 /**

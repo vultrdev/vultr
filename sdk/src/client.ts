@@ -3,6 +3,8 @@
 // =============================================================================
 // Main client class for interacting with the VULTR protocol.
 // Provides high-level methods for all protocol operations.
+//
+// SECURITY FIX-22: Added input validation for all public methods
 // =============================================================================
 
 import {
@@ -42,6 +44,92 @@ import {
   findDepositorPda,
   findAllPoolPdas,
 } from "./pda";
+
+// =============================================================================
+// SECURITY FIX-22: Input Validation Utilities
+// =============================================================================
+
+/**
+ * Validation error for SDK input validation
+ */
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ValidationError";
+  }
+}
+
+/**
+ * Validate that a value is a valid PublicKey
+ */
+function validatePublicKey(value: PublicKey | string, paramName: string): PublicKey {
+  if (!value) {
+    throw new ValidationError(`${paramName} is required`);
+  }
+
+  try {
+    if (typeof value === "string") {
+      return new PublicKey(value);
+    }
+    // Verify it's a valid PublicKey by calling toBase58
+    value.toBase58();
+    return value;
+  } catch {
+    throw new ValidationError(`${paramName} is not a valid public key`);
+  }
+}
+
+/**
+ * Validate that a BN is positive
+ */
+function validatePositiveAmount(amount: BN, paramName: string): void {
+  if (!amount || amount.isNeg() || amount.isZero()) {
+    throw new ValidationError(`${paramName} must be greater than 0`);
+  }
+}
+
+/**
+ * Validate that a BN is non-negative
+ */
+function validateNonNegativeAmount(amount: BN, paramName: string): void {
+  if (!amount || amount.isNeg()) {
+    throw new ValidationError(`${paramName} must be non-negative`);
+  }
+}
+
+/**
+ * Validate fee basis points (0-10000)
+ */
+function validateBps(value: number, paramName: string): void {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 10000) {
+    throw new ValidationError(`${paramName} must be an integer between 0 and 10000`);
+  }
+}
+
+/**
+ * Validate that fees sum to 10000 (100%)
+ */
+function validateFeesSum(depositorFeeBps: number, stakingFeeBps: number, treasuryFeeBps: number): void {
+  const sum = depositorFeeBps + stakingFeeBps + treasuryFeeBps;
+  if (sum !== 10000) {
+    throw new ValidationError(`Fees must sum to 10000 (100%), got ${sum}`);
+  }
+}
+
+/**
+ * Validate fee constraints (depositor >= 50%, staking <= 30%, treasury <= 20%)
+ */
+function validateFeeConstraints(depositorFeeBps: number, stakingFeeBps: number, treasuryFeeBps: number): void {
+  if (depositorFeeBps < 5000) {
+    throw new ValidationError(`Depositor fee must be at least 5000 (50%), got ${depositorFeeBps}`);
+  }
+  if (stakingFeeBps > 3000) {
+    throw new ValidationError(`Staking fee must be at most 3000 (30%), got ${stakingFeeBps}`);
+  }
+  if (treasuryFeeBps > 2000) {
+    throw new ValidationError(`Treasury fee must be at most 2000 (20%), got ${treasuryFeeBps}`);
+  }
+}
 
 // =============================================================================
 // IDL Type (simplified - in production, import generated IDL)
@@ -592,12 +680,19 @@ export class VultrClient {
    * @param amount - Amount to deposit (in base units)
    * @param minSharesOut - Minimum shares to receive (slippage protection, 0 to skip)
    * @returns Transaction signature
+   *
+   * @throws ValidationError if inputs are invalid
    */
   public async deposit(
     depositMint: PublicKey,
     amount: BN,
     minSharesOut: BN = new BN(0)
   ): Promise<TransactionSignature> {
+    // SECURITY FIX-22: Input validation
+    validatePublicKey(depositMint, "depositMint");
+    validatePositiveAmount(amount, "amount");
+    validateNonNegativeAmount(minSharesOut, "minSharesOut");
+
     if (!this.wallet) throw new Error("Wallet required");
 
     const program = this.getProgram();
@@ -673,12 +768,19 @@ export class VultrClient {
    * @param sharesToBurn - Number of shares to burn
    * @param minAmountOut - Minimum tokens to receive (slippage protection, 0 to skip)
    * @returns Transaction signature
+   *
+   * @throws ValidationError if inputs are invalid
    */
   public async withdraw(
     depositMint: PublicKey,
     sharesToBurn: BN,
     minAmountOut: BN = new BN(0)
   ): Promise<TransactionSignature> {
+    // SECURITY FIX-22: Input validation
+    validatePublicKey(depositMint, "depositMint");
+    validatePositiveAmount(sharesToBurn, "sharesToBurn");
+    validateNonNegativeAmount(minAmountOut, "minAmountOut");
+
     if (!this.wallet) throw new Error("Wallet required");
 
     const program = this.getProgram();
@@ -751,6 +853,8 @@ export class VultrClient {
    * @param stakingFeeBps - New staking fee in basis points (default: 1500 = 15%)
    * @param treasuryFeeBps - New treasury fee in basis points (default: 500 = 5%)
    * @returns Transaction signature
+   *
+   * @throws ValidationError if inputs are invalid
    */
   public async updateFees(
     depositMint: PublicKey,
@@ -758,6 +862,14 @@ export class VultrClient {
     stakingFeeBps: number,
     treasuryFeeBps: number
   ): Promise<TransactionSignature> {
+    // SECURITY FIX-22: Input validation
+    validatePublicKey(depositMint, "depositMint");
+    validateBps(depositorFeeBps, "depositorFeeBps");
+    validateBps(stakingFeeBps, "stakingFeeBps");
+    validateBps(treasuryFeeBps, "treasuryFeeBps");
+    validateFeesSum(depositorFeeBps, stakingFeeBps, treasuryFeeBps);
+    validateFeeConstraints(depositorFeeBps, stakingFeeBps, treasuryFeeBps);
+
     if (!this.wallet) throw new Error("Wallet required");
 
     const program = this.getProgram();

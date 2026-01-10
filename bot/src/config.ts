@@ -8,6 +8,8 @@ import { PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
+import { statSync } from "fs";
+import * as os from "os";
 import * as path from "path";
 
 import { BotConfig } from "./types";
@@ -20,8 +22,9 @@ dotenv.config();
 // =============================================================================
 
 const DEFAULTS = {
-  RPC_URL: "https://api.mainnet-beta.solana.com",
-  WS_URL: "wss://api.mainnet-beta.solana.com",
+  // SECURITY FIX-14: No default RPC - require user to set private endpoint
+  RPC_URL: "",
+  WS_URL: "",
   // NEW program ID (simplified design with record_profit)
   VULTR_PROGRAM_ID: "7EhoUeYzjKJB27aoMA4tXoLc9kj6bESVyzwjsN2rUbAe",
   // Pool address must be set in .env (derived from ["pool", deposit_mint])
@@ -78,6 +81,16 @@ export function loadConfig(): BotConfig {
     );
   }
 
+  // SECURITY FIX-14: Require private RPC endpoint
+  const rpcUrl = process.env.RPC_URL;
+  if (!rpcUrl) {
+    throw new Error(
+      "RPC_URL environment variable is required. " +
+        "Use a private RPC endpoint (Helius, QuickNode, Triton, etc.) for production. " +
+        "Public endpoints have rate limits and expose your transaction patterns."
+    );
+  }
+
   // Validate wallet file exists
   const resolvedWalletPath = path.resolve(walletPath);
   if (!fs.existsSync(resolvedWalletPath)) {
@@ -86,8 +99,8 @@ export function loadConfig(): BotConfig {
 
   // Parse optional values with defaults
   const config: BotConfig = {
-    rpcUrl: process.env.RPC_URL || DEFAULTS.RPC_URL,
-    wsUrl: process.env.WS_URL || DEFAULTS.WS_URL,
+    rpcUrl: rpcUrl, // Already validated above
+    wsUrl: process.env.WS_URL || rpcUrl.replace("https://", "wss://"),
     walletPath: resolvedWalletPath,
     vultrProgramId: new PublicKey(
       process.env.VULTR_PROGRAM_ID || DEFAULTS.VULTR_PROGRAM_ID
@@ -176,13 +189,48 @@ function validateConfig(config: BotConfig): void {
 }
 
 /**
- * Load wallet keypair from file
+ * Load wallet keypair from file with security validation
+ *
+ * SECURITY FIX-2: Validates file permissions before loading keypair
  *
  * @param walletPath - Path to keypair JSON file
  * @returns Keypair bytes array
+ * @throws Error if file permissions are insecure (world/group readable)
  */
 export function loadWalletKeypair(walletPath: string): Uint8Array {
-  const keypairJson = fs.readFileSync(walletPath, "utf-8");
+  const resolvedPath = path.resolve(walletPath);
+
+  // ==========================================================================
+  // SECURITY FIX-2: Validate file permissions (Unix/Linux/macOS only)
+  // On Windows, file permissions work differently via ACLs
+  // ==========================================================================
+  if (os.platform() !== "win32") {
+    try {
+      const stats = statSync(resolvedPath);
+      const mode = stats.mode & 0o777;
+
+      // Check if file is readable by group or others (insecure)
+      if ((mode & 0o077) !== 0) {
+        const modeStr = mode.toString(8).padStart(3, "0");
+        throw new Error(
+          `SECURITY ERROR: Keypair file has insecure permissions (${modeStr}). ` +
+          `Other users can read your private key! ` +
+          `Fix with: chmod 600 ${resolvedPath}`
+        );
+      }
+
+      console.log(`[SECURITY] Keypair file permissions validated: ${mode.toString(8).padStart(3, "0")}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`Keypair file not found: ${resolvedPath}`);
+      }
+      throw error;
+    }
+  } else {
+    console.log("[SECURITY] Windows detected - skipping Unix permission check. Ensure keypair is protected via Windows ACLs.");
+  }
+
+  const keypairJson = fs.readFileSync(resolvedPath, "utf-8");
   const keypairArray = JSON.parse(keypairJson);
 
   if (!Array.isArray(keypairArray) || keypairArray.length !== 64) {

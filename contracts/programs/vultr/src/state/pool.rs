@@ -101,6 +101,41 @@ pub struct Pool {
     pub max_pool_size: u64,
 
     // =========================================================================
+    // SECURITY: Timelock Fields (FIX-4, FIX-5, FIX-6, FIX-7)
+    // All sensitive admin operations require a 24-hour delay
+    // =========================================================================
+
+    /// Timestamp when pool was paused (for emergency withdrawal after 7 days)
+    /// 0 if not paused. Set by pause_pool instruction.
+    pub pause_timestamp: i64,
+
+    /// Pending new admin address (requires 24h timelock)
+    /// None (Pubkey::default()) if no pending change
+    pub pending_admin: Pubkey,
+
+    /// Timestamp when admin change was proposed
+    pub admin_change_timestamp: i64,
+
+    /// Pending new bot wallet address (requires 24h timelock)
+    /// None (Pubkey::default()) if no pending change
+    pub pending_bot_wallet: Pubkey,
+
+    /// Timestamp when bot wallet change was proposed
+    pub bot_wallet_change_timestamp: i64,
+
+    /// Pending fee changes (requires 24h timelock)
+    /// 0 if no pending change
+    pub pending_depositor_fee_bps: u16,
+    pub pending_staking_fee_bps: u16,
+    pub pending_treasury_fee_bps: u16,
+
+    /// Timestamp when fee change was proposed
+    pub fee_change_timestamp: i64,
+
+    /// Whether admin is a multisig (informational, for frontends)
+    pub admin_is_multisig: bool,
+
+    // =========================================================================
     // PDA Bumps (stored to avoid recalculation)
     // =========================================================================
 
@@ -112,6 +147,7 @@ pub struct Pool {
 
     /// Bump seed for the share mint PDA
     pub share_mint_bump: u8,
+
 }
 
 impl Pool {
