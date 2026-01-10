@@ -322,6 +322,47 @@ STAKING_PROGRAM_ID=HGGgYd1djHrDSX1KyUiKtY9pbT9ocoGwDER6KyBBGzo4
 
 # Auto-distribute staking rewards after record_profit (true/false)
 AUTO_DISTRIBUTE_STAKING_REWARDS=true
+
+# =============================================================================
+# Alerting Configuration (FIX-18)
+# =============================================================================
+
+# Enable alerting (true/false)
+ALERTS_ENABLED=true
+
+# Minimum severity to send alerts (info, warning, critical)
+ALERT_MIN_SEVERITY=warning
+
+# Slack webhook URL for alerts
+# Create at: https://api.slack.com/messaging/webhooks
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+
+# Discord webhook URL (optional)
+# Create in Discord: Server Settings > Integrations > Webhooks
+# DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+
+# PagerDuty routing key for critical alerts (optional)
+# PAGERDUTY_ROUTING_KEY=your-routing-key
+
+# Telegram bot token and chat ID (optional)
+# TELEGRAM_BOT_TOKEN=your-bot-token
+# TELEGRAM_CHAT_ID=your-chat-id
+
+# Custom webhook URL (optional)
+# CUSTOM_ALERT_WEBHOOK_URL=https://your-webhook.com/alerts
+
+# =============================================================================
+# Circuit Breaker Configuration
+# =============================================================================
+
+# Maximum consecutive failures before opening circuit (default: 5)
+CIRCUIT_BREAKER_MAX_FAILURES=5
+
+# Reset timeout in milliseconds (default: 300000 = 5 minutes)
+CIRCUIT_BREAKER_RESET_TIMEOUT_MS=300000
+
+# Daily loss limit in USD before halting (default: 1000)
+CIRCUIT_BREAKER_DAILY_LOSS_LIMIT_USD=1000
 `;
 
   fs.writeFileSync(outputPath, content);

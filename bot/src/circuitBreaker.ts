@@ -3,9 +3,12 @@
 // =============================================================================
 // Protects the bot from cascading failures and excessive losses by stopping
 // operations when too many consecutive failures occur.
+//
+// Integrates with AlertMonitor (FIX-18) to send alerts when circuit opens.
 // =============================================================================
 
 import { Logger } from "./logger";
+import { AlertMonitor } from "./monitor";
 
 export interface CircuitBreakerConfig {
   maxConsecutiveFailures: number;
@@ -42,10 +45,23 @@ export class CircuitBreaker {
   private lastLossResetDate: string = "";
   private logger: Logger;
   private config: CircuitBreakerConfig;
+  private alertMonitor?: AlertMonitor;
 
-  constructor(logger: Logger, config: Partial<CircuitBreakerConfig> = {}) {
+  constructor(
+    logger: Logger,
+    config: Partial<CircuitBreakerConfig> = {},
+    alertMonitor?: AlertMonitor
+  ) {
     this.logger = logger.child("CircuitBreaker");
     this.config = { ...DEFAULT_CIRCUIT_BREAKER_CONFIG, ...config };
+    this.alertMonitor = alertMonitor;
+  }
+
+  /**
+   * Set the alert monitor (for deferred initialization)
+   */
+  setAlertMonitor(alertMonitor: AlertMonitor): void {
+    this.alertMonitor = alertMonitor;
   }
 
   /**
@@ -62,6 +78,16 @@ export class CircuitBreaker {
       this.logger.error(
         `CIRCUIT BREAKER: Daily loss limit exceeded ($${this.dailyLossTotal}/$${this.config.dailyLossLimitUsd})`
       );
+
+      // Send alert for daily loss limit (only once per day)
+      if (this.alertMonitor && this.state !== CircuitState.OPEN) {
+        this.alertMonitor
+          .alertDailyLossLimitReached(this.dailyLossTotal, this.config.dailyLossLimitUsd)
+          .catch((err) => {
+            this.logger.error("Failed to send daily loss limit alert", err);
+          });
+        this.state = CircuitState.OPEN; // Prevent duplicate alerts
+      }
       return false;
     }
 
@@ -150,6 +176,13 @@ export class CircuitBreaker {
           `Will retry in ${this.config.resetTimeoutMs / 1000} seconds\n` +
           `Daily loss so far: $${this.dailyLossTotal}`
       );
+
+      // Send alert via AlertMonitor
+      if (this.alertMonitor) {
+        this.alertMonitor.alertCircuitBreakerOpen(reason, this.consecutiveFailures).catch((err) => {
+          this.logger.error("Failed to send circuit breaker alert", err);
+        });
+      }
     }
   }
 
