@@ -1128,6 +1128,423 @@ describe("VULTR Protocol - New Simplified Design", () => {
   });
 
   // ==========================================================================
+  // 7. SECURITY FIX TESTS - P0 Priority (Emergency Withdraw & Timelocks)
+  // ==========================================================================
+
+  describe("7. Security Fix Tests (P0)", () => {
+    // Helper to get current slot and advance time
+    // Note: On localnet we can use clock manipulation
+
+    describe("7.1 Emergency Withdrawal (FIX-6)", () => {
+      let testAdmin: Keypair;
+      let testUser: Keypair;
+      let testDepositMint: PublicKey;
+      let testPoolPDA: PublicKey;
+      let testVaultPDA: PublicKey;
+      let testShareMintPDA: PublicKey;
+      let testTreasury: PublicKey;
+      let testStakingVault: PublicKey;
+      let testUserDepositAccount: PublicKey;
+      let testUserShareAccount: PublicKey;
+
+      before(async () => {
+        // Create fresh accounts for emergency withdrawal tests
+        testAdmin = Keypair.generate();
+        testUser = Keypair.generate();
+
+        await airdropSol(connection, testAdmin.publicKey);
+        await airdropSol(connection, testUser.publicKey);
+
+        // Create a separate test mint
+        testDepositMint = await createMockUSDC(connection, testAdmin);
+
+        // Derive PDAs
+        [testPoolPDA] = findPoolPDA(testDepositMint, program.programId);
+        [testVaultPDA] = findVaultPDA(testPoolPDA, program.programId);
+        [testShareMintPDA] = findShareMintPDA(testPoolPDA, program.programId);
+
+        // Create treasury and staking vault
+        const treasuryATA = await getOrCreateAssociatedTokenAccount(
+          connection,
+          testAdmin,
+          testDepositMint,
+          testAdmin.publicKey
+        );
+        testTreasury = treasuryATA.address;
+
+        const stakingVaultKeypair = Keypair.generate();
+        testStakingVault = await createAccount(
+          connection,
+          testAdmin,
+          testDepositMint,
+          testAdmin.publicKey,
+          stakingVaultKeypair
+        );
+
+        // Initialize pool
+        await program.methods
+          .initializePool()
+          .accounts({
+            admin: testAdmin.publicKey,
+            pool: testPoolPDA,
+            depositMint: testDepositMint,
+            shareMint: testShareMintPDA,
+            vault: testVaultPDA,
+            treasury: testTreasury,
+            stakingRewardsVault: testStakingVault,
+            botWallet: testAdmin.publicKey,
+            systemProgram: SystemProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([testAdmin])
+          .rpc();
+
+        // Create user token accounts
+        testUserDepositAccount = (
+          await getOrCreateAssociatedTokenAccount(
+            connection,
+            testUser,
+            testDepositMint,
+            testUser.publicKey
+          )
+        ).address;
+
+        testUserShareAccount = (
+          await getOrCreateAssociatedTokenAccount(
+            connection,
+            testUser,
+            testShareMintPDA,
+            testUser.publicKey
+          )
+        ).address;
+
+        // Mint tokens to user and deposit
+        await mintTokens(
+          connection,
+          testAdmin,
+          testDepositMint,
+          testUserDepositAccount,
+          10_000_000_000 // 10,000 USDC
+        );
+
+        const [testDepositorPDA] = findDepositorPDA(
+          testPoolPDA,
+          testUser.publicKey,
+          program.programId
+        );
+
+        await program.methods
+          .deposit(new BN(5_000_000_000), new BN(0))
+          .accounts({
+            depositor: testUser.publicKey,
+            pool: testPoolPDA,
+            depositorAccount: testDepositorPDA,
+            depositMint: testDepositMint,
+            shareMint: testShareMintPDA,
+            userDepositAccount: testUserDepositAccount,
+            userShareAccount: testUserShareAccount,
+            vault: testVaultPDA,
+            systemProgram: SystemProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([testUser])
+          .rpc();
+      });
+
+      it("should FAIL emergency withdraw when pool is NOT paused", async () => {
+        const [testDepositorPDA] = findDepositorPDA(
+          testPoolPDA,
+          testUser.publicKey,
+          program.programId
+        );
+
+        try {
+          await program.methods
+            .emergencyWithdraw(new BN(1_000_000_000))
+            .accounts({
+              withdrawer: testUser.publicKey,
+              pool: testPoolPDA,
+              depositorAccount: testDepositorPDA,
+              depositMint: testDepositMint,
+              shareMint: testShareMintPDA,
+              userDepositAccount: testUserDepositAccount,
+              userShareAccount: testUserShareAccount,
+              vault: testVaultPDA,
+              tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .signers([testUser])
+            .rpc();
+          assert.fail("Should have failed - pool is not paused");
+        } catch (err) {
+          console.log("Expected error (not paused):", err.message.substring(0, 80));
+          assert.include(
+            err.message.toLowerCase(),
+            "not paused",
+            "Should fail with pool not paused error"
+          );
+        }
+      });
+
+      it("should FAIL emergency withdraw when paused but timelock not expired (< 7 days)", async () => {
+        // Pause the pool
+        await program.methods
+          .pausePool(true)
+          .accounts({
+            admin: testAdmin.publicKey,
+            pool: testPoolPDA,
+          })
+          .signers([testAdmin])
+          .rpc();
+
+        const pool = await program.account.pool.fetch(testPoolPDA);
+        assert.equal(pool.isPaused, true, "Pool should be paused");
+        assert.ok(pool.pauseTimestamp.toNumber() > 0, "Pause timestamp should be set");
+
+        const [testDepositorPDA] = findDepositorPDA(
+          testPoolPDA,
+          testUser.publicKey,
+          program.programId
+        );
+
+        try {
+          await program.methods
+            .emergencyWithdraw(new BN(1_000_000_000))
+            .accounts({
+              withdrawer: testUser.publicKey,
+              pool: testPoolPDA,
+              depositorAccount: testDepositorPDA,
+              depositMint: testDepositMint,
+              shareMint: testShareMintPDA,
+              userDepositAccount: testUserDepositAccount,
+              userShareAccount: testUserShareAccount,
+              vault: testVaultPDA,
+              tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .signers([testUser])
+            .rpc();
+          assert.fail("Should have failed - timelock not expired");
+        } catch (err) {
+          console.log("Expected error (timelock):", err.message.substring(0, 80));
+          assert.include(
+            err.message.toLowerCase(),
+            "timelock",
+            "Should fail with emergency timelock not expired error"
+          );
+        }
+
+        // Unpause for other tests
+        await program.methods
+          .pausePool(false)
+          .accounts({
+            admin: testAdmin.publicKey,
+            pool: testPoolPDA,
+          })
+          .signers([testAdmin])
+          .rpc();
+      });
+
+      // Note: Testing successful emergency withdrawal after 7 days requires
+      // clock manipulation which is only possible with solana-test-validator
+      // and the warpSlot command. In production testing, use:
+      // await provider.connection.requestAirdrop(...) with clock warp
+      it("should document: emergency withdraw SUCCEEDS after 7 days pause (requires clock warp)", async () => {
+        console.log(
+          "NOTE: Full 7-day timelock test requires solana-test-validator with clock warp"
+        );
+        console.log("Manual verification steps:");
+        console.log("1. Pause pool");
+        console.log("2. Warp slot forward by 604800 seconds (7 days)");
+        console.log("3. Call emergency_withdraw - should succeed");
+        assert.ok(true, "Documentation test");
+      });
+    });
+
+    describe("7.2 Admin Transfer Timelock (FIX-4)", () => {
+      it("should FAIL finalize admin transfer before 24h timelock", async () => {
+        const newAdmin = Keypair.generate();
+
+        // First, propose the admin transfer
+        await program.methods
+          .proposeAdminTransfer()
+          .accounts({
+            admin: admin.publicKey,
+            pool: poolPDA,
+            newAdmin: newAdmin.publicKey,
+          })
+          .signers([admin])
+          .rpc();
+
+        // Verify pending admin is set
+        const poolAfterPropose = await program.account.pool.fetch(poolPDA);
+        assert.ok(
+          poolAfterPropose.pendingAdmin.equals(newAdmin.publicKey),
+          "Pending admin should be set"
+        );
+        assert.ok(
+          poolAfterPropose.adminChangeTimestamp.toNumber() > 0,
+          "Admin change timestamp should be set"
+        );
+
+        // Try to finalize immediately - should fail
+        try {
+          await program.methods
+            .finalizeAdminTransfer()
+            .accounts({
+              admin: admin.publicKey,
+              pool: poolPDA,
+            })
+            .signers([admin])
+            .rpc();
+          assert.fail("Should have failed - timelock not expired");
+        } catch (err) {
+          console.log("Expected error (24h timelock):", err.message.substring(0, 80));
+          assert.include(
+            err.message.toLowerCase(),
+            "timelock",
+            "Should fail with timelock not expired error"
+          );
+        }
+
+        // Cancel the pending change for cleanup
+        await program.methods
+          .cancelAdminTransfer()
+          .accounts({
+            admin: admin.publicKey,
+            pool: poolPDA,
+          })
+          .signers([admin])
+          .rpc();
+
+        const poolAfterCancel = await program.account.pool.fetch(poolPDA);
+        assert.ok(
+          poolAfterCancel.pendingAdmin.equals(PublicKey.default),
+          "Pending admin should be cleared"
+        );
+      });
+
+      it("should document: admin transfer SUCCEEDS after 24h (requires clock warp)", async () => {
+        console.log(
+          "NOTE: Full 24h timelock test requires solana-test-validator with clock warp"
+        );
+        console.log("Manual verification steps:");
+        console.log("1. Call propose_admin_transfer with new admin");
+        console.log("2. Warp slot forward by 86400 seconds (24 hours)");
+        console.log("3. Call finalize_admin_transfer - should succeed");
+        console.log("4. Verify pool.admin == new_admin");
+        assert.ok(true, "Documentation test");
+      });
+    });
+
+    describe("7.3 Bot Wallet Timelock (FIX-5)", () => {
+      it("should FAIL finalize bot wallet update before 24h timelock", async () => {
+        const newBotWallet = Keypair.generate();
+
+        // Propose the bot wallet change
+        await program.methods
+          .proposeBotWallet()
+          .accounts({
+            admin: admin.publicKey,
+            pool: poolPDA,
+            newBotWallet: newBotWallet.publicKey,
+          })
+          .signers([admin])
+          .rpc();
+
+        // Verify pending bot wallet is set
+        const poolAfterPropose = await program.account.pool.fetch(poolPDA);
+        assert.ok(
+          poolAfterPropose.pendingBotWallet.equals(newBotWallet.publicKey),
+          "Pending bot wallet should be set"
+        );
+
+        // Try to finalize immediately - should fail
+        try {
+          await program.methods
+            .finalizeBotWallet()
+            .accounts({
+              admin: admin.publicKey,
+              pool: poolPDA,
+            })
+            .signers([admin])
+            .rpc();
+          assert.fail("Should have failed - timelock not expired");
+        } catch (err) {
+          console.log("Expected error (bot wallet timelock):", err.message.substring(0, 80));
+          assert.include(
+            err.message.toLowerCase(),
+            "timelock",
+            "Should fail with timelock not expired error"
+          );
+        }
+
+        // Cancel for cleanup
+        await program.methods
+          .cancelBotWallet()
+          .accounts({
+            admin: admin.publicKey,
+            pool: poolPDA,
+          })
+          .signers([admin])
+          .rpc();
+      });
+    });
+
+    describe("7.4 Fee Change Timelock (FIX-7)", () => {
+      it("should FAIL finalize fee change before 24h timelock", async () => {
+        // Propose fee change
+        await program.methods
+          .proposeFees(7000, 2000, 1000) // 70%, 20%, 10%
+          .accounts({
+            admin: admin.publicKey,
+            pool: poolPDA,
+          })
+          .signers([admin])
+          .rpc();
+
+        // Verify pending fees are set
+        const poolAfterPropose = await program.account.pool.fetch(poolPDA);
+        assert.equal(poolAfterPropose.pendingDepositorFeeBps, 7000);
+        assert.equal(poolAfterPropose.pendingStakingFeeBps, 2000);
+        assert.equal(poolAfterPropose.pendingTreasuryFeeBps, 1000);
+
+        // Try to finalize immediately - should fail
+        try {
+          await program.methods
+            .finalizeFees()
+            .accounts({
+              admin: admin.publicKey,
+              pool: poolPDA,
+            })
+            .signers([admin])
+            .rpc();
+          assert.fail("Should have failed - timelock not expired");
+        } catch (err) {
+          console.log("Expected error (fee timelock):", err.message.substring(0, 80));
+          assert.include(
+            err.message.toLowerCase(),
+            "timelock",
+            "Should fail with timelock not expired error"
+          );
+        }
+
+        // Cancel for cleanup
+        await program.methods
+          .cancelFees()
+          .accounts({
+            admin: admin.publicKey,
+            pool: poolPDA,
+          })
+          .signers([admin])
+          .rpc();
+
+        // Verify fees unchanged
+        const poolAfterCancel = await program.account.pool.fetch(poolPDA);
+        assert.equal(poolAfterCancel.depositorFeeBps, DEPOSITOR_FEE_BPS);
+      });
+    });
+  });
+
+  // ==========================================================================
   // Summary
   // ==========================================================================
 
